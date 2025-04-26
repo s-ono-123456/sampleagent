@@ -10,14 +10,6 @@ from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 
-
-# 環境変数の設定
-os.environ["LANGSMITH_TRACING"]="true"
-os.environ["LANGSMITH_ENDPOINT"]="https://api.smith.langchain.com"
-os.environ["LANGSMITH_API_KEY"]=os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGSMITH_PROJECT"]="sampleagent"
-os.environ["OPENAI_API_KEY"]=os.getenv("OPENAI_API_KEY")
-
 MODEL_NAME = "gpt-4.1-nano"
 
 model = ChatOpenAI(model=MODEL_NAME, temperature=0)
