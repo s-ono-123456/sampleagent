@@ -2,3 +2,8 @@ openai
 langchain
 langchain_openai
 langsmith
+langchain_text_splitters
+langchain_community
+faiss-cpu
+sentence-transformers
+langchain-huggingface
