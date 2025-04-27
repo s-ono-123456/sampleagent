@@ -87,7 +87,9 @@ class State(TypedDict):
     # 評価値
     evaluates: Evaluates
     # 情報ギャップの有無
-    has_information_gap: bool
+    has_information_gap: bool = False
+    # ループ回数
+    loop_count: int = 0
     # 最終回答
     final_response: str
 
@@ -158,12 +160,28 @@ def query_analyzer_agent(state: State):
     user_query = messages[-1].content if isinstance(messages[-1].content, str) else messages[-1].content[0].text
     
     # LLMを使用して質問を分析する
-    system_message = """
-    あなたは質問分析の専門家です。ユーザーからの質問を分析し、以下の情報の組み合わせを抽出してください：
-    1. 質問のカテゴリ：「batch_design」（バッチ設計に関する質問）または「screen_design」（画面設計に関する質問）
-    2. 重要キーワード：質問から抽出された検索に役立つ新規の質問文
-    
-    """
+    has_gap = state.get("has_information_gap", False)
+    loop_count = state.get("loop_count", 0)
+    loop_count += 1
+    state["loop_count"] = loop_count
+
+
+    if has_gap: 
+        # 情報ギャップがある場合は、質問を再分析する
+        system_message = """
+        あなたは情報補完の専門家です。ユーザーの質問と現在の情報を分析し、不足している情報を特定してください。
+        以下の情報の組み合わせを抽出してください：
+        1. 質問のカテゴリ：「batch_design」（バッチ設計に関する質問）または「screen_design」（画面設計に関する質問）
+        2. 重要キーワード：質問から抽出された不足している情報を検索するために役立つ新規の質問文
+        
+        """
+    else:
+        system_message = """
+        あなたは質問分析の専門家です。ユーザーからの質問を分析し、以下の情報の組み合わせを抽出してください：
+        1. 質問のカテゴリ：「batch_design」（バッチ設計に関する質問）または「screen_design」（画面設計に関する質問）
+        2. 重要キーワード：質問から抽出された検索に役立つ新規の質問文
+        
+        """
     
     analysis_prompt = [
         SystemMessage(content=system_message),
@@ -237,6 +255,8 @@ def information_evaluator_agent(state: State):
     messages = state["messages"]
     user_query = messages[-1].content if isinstance(messages[-1].content, str) else messages[-1].content[0].text
     relevant_documents = state["relevant_documents"]
+
+    useful_documents = state.get("useful_documents", [])
     
     if not relevant_documents:
         return {
@@ -269,10 +289,8 @@ def information_evaluator_agent(state: State):
     
     # LLMの回答を構造化
     # 実際の実装では、適切なJSON解析が必要
-    evaluated_info = []
     has_gap = False
     evaluates = evaluation_result.evaluates
-    useful_documents = []
 
     for evaluate, relevant_document in zip(evaluates, relevant_documents):
         usefulness = evaluate.usefulness
@@ -480,9 +498,9 @@ def gragh_build():
     # コントローラーによる条件付きルーティング
     graph_builder.add_conditional_edges(
         "information_evaluator",
-        lambda state: "information_completer" if state.get("has_information_gap", False) else "response_generator",
+        lambda state: "response_generator" if state.get("has_information_gap", False) is False or state.get("loop_count", 0) > 2 else "query_analyzer",
         {
-            "information_completer": "information_completer",
+            "query_analyzer": "query_analyzer",
             "response_generator": "response_generator"
         }
     )
