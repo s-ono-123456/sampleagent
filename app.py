@@ -151,7 +151,7 @@ with tab2:
     try:
         # LangGraphのメモリーダイドを取得して表示
         mermaid_code = gragh_build().get_graph().draw_mermaid()
-        print(mermaid_code)  # デバッグ用
+        # print(mermaid_code)  # デバッグ用
         st_mermaid(mermaid_code, height=600)
     except Exception as e:
         st.error(f"フローチャートの表示中にエラーが発生しました: {str(e)}")
