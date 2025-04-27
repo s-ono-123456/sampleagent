@@ -282,7 +282,7 @@ def information_evaluator_agent(state: State):
         if usefulness > 7:
             useful_documents.append(relevant_document)
 
-    if len(useful_documents) < 2:
+    if len(useful_documents) < 6:
         has_gap = True
     
     # 状態を更新
@@ -311,55 +311,58 @@ def information_completer_agent(state: State):
     
     messages = state["messages"]
     user_query = messages[-1].content if isinstance(messages[-1].content, str) else messages[-1].content[0].text
-    evaluated_info = state["evaluated_information"]
+    useful_documents = state["useful_documents"]
     
     # LLMを使用して追加検索クエリを生成
     system_message = """
     あなたは情報補完の専門家です。ユーザーの質問と現在の情報を分析し、不足している情報を特定してください。
-    そして、その不足情報を検索するための追加クエリを生成してください。
+    以下の情報の組み合わせを抽出してください：
+    1. 質問のカテゴリ：「batch_design」（バッチ設計に関する質問）または「screen_design」（画面設計に関する質問）
+    2. 重要キーワード：質問から抽出された不足している情報を検索するために役立つ新規の質問文
     
     JSON形式で回答してください。
     """
     
     # 現在の情報を文字列として連結
-    current_info = "\n\n".join([f"情報{i+1}:\n{info.get('content', '')}" for i, info in enumerate(evaluated_info)])
+    current_info = "\n\n".join([f"情報{i+1}:\n{info.get('content', '')}" for i, info in enumerate(useful_documents)])
     
     completion_prompt = [
         SystemMessage(content=system_message),
         HumanMessage(content=f"質問: {user_query}\n\n現在の情報:\n{current_info}")
     ]
     
-    completion_result = llm.invoke(completion_prompt)
+    completion_result = llm.with_structured_output(Questions).invoke(completion_prompt)
     
     # 追加検索クエリを抽出
-    try:
-        result_dict = json.loads(completion_result.content)
-        additional_query = result_dict.get("追加クエリ", "")
-    except:
-        # JSONパースに失敗した場合は元のクエリを拡張
-        additional_query = user_query + " 詳細"
-    
-    # 追加検索を実行
-    vector_store = load_vector_stores(embedding_model_name)
-    additional_results = vector_store.similarity_search_with_score(additional_query, k=3)
-    
-    # 新しい検索結果を追加
+    add_questions = completion_result.questions
+
+
     new_documents = []
-    for doc, score in additional_results:
-        # if score < 0.8:  # 数値が小さいほど類似度が高い場合
-        new_documents.append({
-            "content": doc.page_content,
-            "metadata": doc.metadata,
-            "score": float(score),
-            "is_additional": True
-        })
+    for question in add_questions:
+        question_category = question.question_category
+        search_query = question.search_query
+        
+        # ベクトルストアを読み込む
+        vector_store = load_vector_stores(embedding_model_name)
+        
+        # 検索を実行
+        search_results = vector_store.similarity_search_with_score(search_query, k=5)
+        
+        for doc, score in search_results:
+            # スコアが閾値を超える場合のみ含める
+            # if score < 0.8:  # 数値が小さいほど類似度が高い場合
+            new_documents.append({
+                "content": doc.page_content,
+                "metadata": doc.metadata,
+                "score": float(score)
+            })
     
     # 元の関連文書リストと新しい文書を結合
-    combined_documents = state["relevant_documents"] + new_documents
+    combined_documents = state["useful_documents"] + new_documents
     
     # 状態を更新
     return {
-        "relevant_documents": combined_documents,
+        "useful_documents": combined_documents,
         "has_information_gap": False  # 補完したので、ギャップなしとマーク
     }
 
@@ -470,7 +473,7 @@ def gragh_build():
     graph_builder.add_edge(START, "query_analyzer")
     graph_builder.add_edge("query_analyzer", "search")
     graph_builder.add_edge("search", "information_evaluator")
-    graph_builder.add_edge("information_evaluator", "information_completer")
+    # graph_builder.add_edge("information_evaluator", "information_completer")
     graph_builder.add_edge("information_completer", "response_generator")
     graph_builder.add_edge("response_generator", END)
     
