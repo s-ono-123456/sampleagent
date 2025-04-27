@@ -27,7 +27,6 @@ graph = get_graph()
 # サイドバーのオプション
 with st.sidebar:
     st.header("オプション")
-    show_raw_response = st.checkbox("詳細な処理結果を表示", value=False)
     st.divider()
     st.subheader("使用可能な質問例:")
     st.markdown("""
@@ -70,94 +69,63 @@ if user_input:
             }
             
             # 詳細表示モードのための処理
-            if show_raw_response:
-                # Graphを使用しつつ、詳細情報を収集
-                processing_results = {
-                    "user_query": user_input,
-                    "analyzed_questions": [],
-                    "search_results": [],
-                    "final_response": None
-                }
-                
-                with st.status("処理中...", expanded=True) as status:
-                    events = graph.stream(
-                        {"messages": [HumanMessage(content=user_input)]},
-                        config,
-                        stream_mode="values",
-                    )
-                    print("events:", events)
-                    # イベントをストリーミングして処理状況を更新
-                    for event in events:
-                        # ノード名を取得して状態を更新
-                        if "node_name" in event:
-                            node_name = event["node_name"]
-                            if node_name == "query_analyzer":
-                                status.update(label="質問の分析中...", state="running")
-                                if "questions" in event:
-                                    processing_results["analyzed_questions"] = event["questions"]
-                                    status.update(label="質問分析完了", state="complete")
-                            elif node_name == "search":
-                                status.update(label="関連情報の検索中...", state="running")
-                                if "relevant_documents" in event:
-                                    processing_results["search_results"] = event["relevant_documents"]
-                                    status.update(label="検索完了", state="complete")
-                            elif node_name == "information_evaluator":
-                                status.update(label="情報の評価中...", state="running")
-                            elif node_name == "information_completer":
-                                status.update(label="情報の補完中...", state="running")
-                            elif node_name == "response_generator":
-                                status.update(label="回答の生成中...", state="running")
-                        
-                        # 最終的な回答を取得
-                        if event.get("messages") and len(event["messages"]) > 0:
-                            final_message = event["messages"][-1]
-                            if hasattr(final_message, "content"):
-                                final_response = final_message.content
-                                processing_results["final_response"] = final_response
-                                status.update(label="処理完了", state="complete")
-                
-                # 詳細情報の表示
-                st.subheader("処理詳細")
-                
-                # 分析された質問のカテゴリーと検索クエリの表示
-                st.write("【分析された質問】")
-                for i, q in enumerate(processing_results["analyzed_questions"]):
-                    st.write(f"質問 {i+1}: カテゴリ `{q.question_category}`, 検索クエリ: `{q.search_query}`")
-                
-                # 検索結果の表示
-                st.write("【関連文書】")
-                for i, doc in enumerate(processing_results["search_results"][:3]):  # 最初の3件のみ表示
-                    st.write(f"文書 {i+1}: {doc['metadata'].get('source', '不明')}")
-                    with st.expander(f"内容を表示"):
-                        st.write(doc['content'])
-                        st.write(f"スコア: {doc['score']}")
-                
-                # 最終回答
-                st.write("【最終回答】")
-                message_placeholder.markdown(processing_results["final_response"])
-            else:
-                # グラフを使った実行（通常モード）
-                events = graph.stream(
-                    {"messages": [HumanMessage(content=user_input)]},
+            # Graphを使用しつつ、詳細情報を収集
+            processing_results = {
+                "user_query": user_input,
+                "analyzed_questions": [],
+                "search_results": [],
+                "final_response": None
+            }
+            endflg = False
+            with st.status("処理中...", expanded=True) as status:
+                for chunk in graph.stream(
+                    {"messages": [HumanMessage(content=user_input)],
+                        "last_node": ""},
                     config,
                     stream_mode="values",
-                )
-                
-                # 最後のメッセージを取得して表示
-                final_response = None
-                for event in events:
-                    if event.get("messages") and len(event["messages"]) > 0:
-                        final_message = event["messages"][-1]
+                ):
+                    # イベントをストリーミングして処理状況を更
+                    # ノード名を取得して状態を更新
+                    node_name = chunk['last_node']
+                    if node_name == "query_analyzer":
+                        status.update(label="質問の分析中...", state="running")
+                    elif node_name == "search":
+                        status.update(label="関連情報の検索中...", state="running")
+                    elif node_name == "information_evaluator":
+                        status.update(label="情報の評価中...", state="running")
+                    elif node_name == "information_completer":
+                        status.update(label="情報の補完中...", state="running")
+                    elif node_name == "response_generator":
+                        status.update(label="回答の生成中...", state="running")
+                        endflg = True
+                    elif node_name == "":
+                        status.update(label="呼び出し中...", state="running")
+                    
+                    # 最終的な回答を取得
+                    if endflg and chunk.get("messages") and len(chunk["messages"]) > 0:
+                        final_message = chunk["messages"][-1]
+                        useful_documents = chunk['useful_documents']
                         if hasattr(final_message, "content"):
                             final_response = final_message.content
-                
-                if final_response:
-                    message_placeholder.markdown(final_response)
-                else:
-                    message_placeholder.markdown("回答を生成できませんでした。")
+                            processing_results["final_response"] = final_response
+                            status.update(label="処理完了", state="complete")
+            
+            # 詳細情報の表示
+            st.subheader("処理詳細")
+            # 検索結果の表示
+            st.write("【関連文書】")
+            for i, doc in enumerate(useful_documents[:3]):  # 最初の3件のみ表示
+                st.write(f"文書 {i+1}: {doc['metadata'].get('source', '不明')}")
+                with st.expander(f"内容を表示"):
+                    st.write(doc['content'])
+                    st.write(f"スコア: {doc['score']}")
+            
+            # 最終回答
+            #st.write("【最終回答】")
+            message_placeholder.markdown(processing_results["final_response"])
             
             # チャット履歴に回答を追加
-            st.session_state.messages.append({"role": "assistant", "content": final_response if final_response else "回答を生成できませんでした。"})
+            # st.session_state.messages.append({"role": "assistant", "content": final_response if final_response else "回答を生成できませんでした。"})
             
         except Exception as e:
             error_message = f"エラーが発生しました: {str(e)}"
@@ -165,7 +133,3 @@ if user_input:
             st.error(error_message)
             import traceback
             st.error(traceback.format_exc())
-
-# フッター
-st.divider()
-st.markdown("© 2025 RAGエージェントアプリ")

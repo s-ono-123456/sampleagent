@@ -92,6 +92,8 @@ class State(TypedDict):
     loop_count: int = 0
     # 最終回答
     final_response: str
+    # 最後のノード情報
+    last_node: str = ""
 
 # chatbot関数の定義
 # この関数は現在の状態(メッセージ履歴)を受け取り、LLMの応答を含む新しい状態を返します
@@ -200,6 +202,7 @@ def query_analyzer_agent(state: State):
     # 状態を更新
     return {
         "questions": questions,
+        "last_node": "query_analyzer",
     }
 
 def search_agent(state: State):
@@ -238,7 +241,8 @@ def search_agent(state: State):
     
     # 状態を更新
     return {
-        "relevant_documents": results
+        "relevant_documents": results,
+        "last_node": "search",
     }
 
 def information_evaluator_agent(state: State):
@@ -261,7 +265,8 @@ def information_evaluator_agent(state: State):
     if not relevant_documents:
         return {
             "evaluated_information": [],
-            "has_information_gap": True
+            "has_information_gap": True,
+            "last_node": "information_evaluator",
         }
     
     # LLMを使用して情報の関連性を評価
@@ -307,7 +312,8 @@ def information_evaluator_agent(state: State):
     return {
         "evaluates": evaluation_result,
         "useful_documents": useful_documents,
-        "has_information_gap": has_gap
+        "has_information_gap": has_gap,
+        "last_node": "information_evaluator",
     }
 
 def information_completer_agent(state: State):
@@ -381,7 +387,8 @@ def information_completer_agent(state: State):
     # 状態を更新
     return {
         "useful_documents": combined_documents,
-        "has_information_gap": False  # 補完したので、ギャップなしとマーク
+        "has_information_gap": False,  # 補完したので、ギャップなしとマーク
+        "last_node": "information_completer",
     }
 
 def response_generator_agent(state: State):
@@ -426,7 +433,8 @@ def response_generator_agent(state: State):
     # 状態を更新
     return {
         "final_response": final_response,
-        "messages": [AIMessage(content=final_response)]
+        "messages": [AIMessage(content=final_response)],
+        "last_node": "response_generator",
     }
 
 def controller_agent(state: State):
