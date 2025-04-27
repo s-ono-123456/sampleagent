@@ -54,8 +54,6 @@ tools = [tool]
 
 llm_with_tools = llm.bind_tools(tools)
 
-
-
 class Question(BaseModel):
     question_category: str
     search_query: str
@@ -94,39 +92,6 @@ class State(TypedDict):
     final_response: str
     # 最後のノード情報
     last_node: str = ""
-
-# chatbot関数の定義
-# この関数は現在の状態(メッセージ履歴)を受け取り、LLMの応答を含む新しい状態を返します
-# state: 現在の会話の状態（メッセージリストを含む）
-# 戻り値: LLMからの応答メッセージを含む更新された状態
-def chatbot(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
-
-
-class BasicToolNode:
-    """最後のAIMessageでリクエストされたツールを実行するノード。"""
-
-    def __init__(self, tools: list) -> None:
-        self.tools_by_name = {tool.name: tool for tool in tools}
-
-    def __call__(self, inputs: dict):
-        if messages := inputs.get("messages", []):
-            message = messages[-1]
-        else:
-            raise ValueError("No message found in input")
-        outputs = []
-        for tool_call in message.tool_calls:
-            tool_result = self.tools_by_name[tool_call["name"]].invoke(
-                tool_call["args"]
-            )
-            outputs.append(
-                ToolMessage(
-                    content=json.dumps(tool_result),
-                    name=tool_call["name"],
-                    tool_call_id=tool_call["id"],
-                )
-            )
-        return {"messages": outputs}
 
 def route_tools(
     state: State,
@@ -487,13 +452,6 @@ def gragh_build():
     graph_builder.add_node("information_evaluator", information_evaluator_agent)
     graph_builder.add_node("information_completer", information_completer_agent)
     graph_builder.add_node("response_generator", response_generator_agent)
-    
-    # ツールノード（既存）
-    tool_node = BasicToolNode(tools=[tool])
-    graph_builder.add_node("tools", tool_node)
-    
-    # チャットボットノード（既存）
-    graph_builder.add_node("chatbot", chatbot)
     
     # エッジの追加：基本的なフロー
     graph_builder.add_edge(START, "query_analyzer")
