@@ -27,7 +27,6 @@ from langgraph.prebuilt.chat_agent_executor import AgentState
 from langgraph.prebuilt import create_react_agent
 from langgraph.prebuilt import InjectedState
 from langgraph.graph.message import add_messages
-from langchain.chat_models import init_chat_model
 from typing import TypedDict
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.memory import MemorySaver
@@ -44,15 +43,39 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 MODEL_NAME = "gpt-4.1-nano"
 embedding_model_name = "pkshatech/GLuCoSE-base-ja-v2"
 
+# モデルの初期化
+def init_chat_model(model_name: str) -> ChatOpenAI:
+    """
+    モデルを初期化する関数
+    
+    Args:
+        model_name: モデル名
+        
+    Returns:
+        初期化されたモデル
+    """
+    # OpenAIのAPIキーを取得
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    
+    # モデルの初期化
+    llm = ChatOpenAI(
+        model_name=model_name,
+        temperature=0.0,
+        openai_api_key=openai_api_key,
+        streaming=True,
+        verbose=True,
+        max_tokens=2000,
+        request_timeout=60,
+    )
+    # ツールの初期化
+    tool = TavilySearch(max_results=2)
+    tools = []
+
+    llm_with_tools = llm.bind_tools(tools)
+    
+    return llm_with_tools
+
 llm = init_chat_model(MODEL_NAME)
-
-tool = TavilySearch(max_results=2)
-tools = [tool]
-
-# ツールは直接呼び出すこともできる。
-# tool.invoke("What's a 'node' in LangGraph?")
-
-llm_with_tools = llm.bind_tools(tools)
 
 class Question(BaseModel):
     question_category: str
@@ -92,23 +115,6 @@ class State(TypedDict):
     final_response: str
     # 最後のノード情報
     last_node: str = ""
-
-def route_tools(
-    state: State,
-):
-    """
-    最後のメッセージにツール呼び出しがある場合はToolNodeにルーティングするために条件付きエッジで使用します。
-    そうでない場合はENDへルーティングします。
-    """
-    if isinstance(state, list):
-        ai_message = state[-1]
-    elif messages := state.get("messages", []):
-        ai_message = messages[-1]
-    else:
-        raise ValueError(f"No messages found in input state to tool_edge: {state}")
-    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
-        return "tools"
-    return END
 
 # 各専門エージェントの実装
 
@@ -196,8 +202,9 @@ def search_agent(state: State):
         search_results = vector_store.similarity_search_with_score(search_query, k=5)
         
         for doc, score in search_results:
-            # スコアが閾値を超える場合のみ含める
-            # if score < 0.8:  # 数値が小さいほど類似度が高い場合
+            if doc.page_content in results:
+                # 既に結果に含まれている場合はスキップ
+                continue
             results.append({
                 "content": doc.page_content,
                 "metadata": doc.metadata,
@@ -268,6 +275,10 @@ def information_evaluator_agent(state: State):
         appendix = evaluate.appendix
 
         if usefulness > 7:
+            if relevant_document in useful_documents:
+                # 既に有用文書リストに含まれている場合はスキップ
+                continue
+            # 有用性が高い場合はリストに追加
             useful_documents.append(relevant_document)
 
     if len(useful_documents) < 6:
@@ -279,81 +290,6 @@ def information_evaluator_agent(state: State):
         "useful_documents": useful_documents,
         "has_information_gap": has_gap,
         "last_node": "information_evaluator",
-    }
-
-def information_completer_agent(state: State):
-    """
-    情報補完エージェント
-    不足情報を特定し追加検索を行う
-    
-    Args:
-        state: 現在の状態
-        
-    Returns:
-        更新された状態（補完された情報を含む）
-    """
-    has_gap = state["has_information_gap"]
-    
-    if not has_gap:
-        # 情報ギャップがなければそのまま返す
-        return state
-    
-    messages = state["messages"]
-    user_query = messages[-1].content if isinstance(messages[-1].content, str) else messages[-1].content[0].text
-    useful_documents = state["useful_documents"]
-    
-    # LLMを使用して追加検索クエリを生成
-    system_message = """
-    あなたは情報補完の専門家です。ユーザーの質問と現在の情報を分析し、不足している情報を特定してください。
-    以下の情報の組み合わせを抽出してください：
-    1. 質問のカテゴリ：「batch_design」（バッチ設計に関する質問）または「screen_design」（画面設計に関する質問）
-    2. 重要キーワード：質問から抽出された不足している情報を検索するために役立つ新規の質問文
-    
-    JSON形式で回答してください。
-    """
-    
-    # 現在の情報を文字列として連結
-    current_info = "\n\n".join([f"情報{i+1}:\n{info.get('content', '')}" for i, info in enumerate(useful_documents)])
-    
-    completion_prompt = [
-        SystemMessage(content=system_message),
-        HumanMessage(content=f"質問: {user_query}\n\n現在の情報:\n{current_info}")
-    ]
-    
-    completion_result = llm.with_structured_output(Questions).invoke(completion_prompt)
-    
-    # 追加検索クエリを抽出
-    add_questions = completion_result.questions
-
-
-    new_documents = []
-    for question in add_questions:
-        question_category = question.question_category
-        search_query = question.search_query
-        
-        # ベクトルストアを読み込む
-        vector_store = load_vector_stores(embedding_model_name)
-        
-        # 検索を実行
-        search_results = vector_store.similarity_search_with_score(search_query, k=5)
-        
-        for doc, score in search_results:
-            # スコアが閾値を超える場合のみ含める
-            # if score < 0.8:  # 数値が小さいほど類似度が高い場合
-            new_documents.append({
-                "content": doc.page_content,
-                "metadata": doc.metadata,
-                "score": float(score)
-            })
-    
-    # 元の関連文書リストと新しい文書を結合
-    combined_documents = state["useful_documents"] + new_documents
-    
-    # 状態を更新
-    return {
-        "useful_documents": combined_documents,
-        "has_information_gap": False,  # 補完したので、ギャップなしとマーク
-        "last_node": "information_completer",
     }
 
 def response_generator_agent(state: State):
@@ -402,40 +338,6 @@ def response_generator_agent(state: State):
         "last_node": "response_generator",
     }
 
-def controller_agent(state: State):
-    """
-    コントローラーエージェント
-    全体の処理フローを制御し、各専門エージェントを調整する
-    
-    Args:
-        state: 現在の状態
-        
-    Returns:
-        次のステップを示す文字列（"analyze", "search", "evaluate", "complete", "respond", "end"）
-    """
-    # 初期ステップ：質問分析
-    if "question_category" not in state or not state.get("question_category"):
-        return "analyze"
-    
-    # 検索ステップ：関連設計書を検索
-    if "relevant_documents" not in state or not state.get("relevant_documents"):
-        return "search"
-    
-    # 評価ステップ：情報の関連性を評価
-    if "evaluated_information" not in state:
-        return "evaluate"
-    
-    # 補完ステップ：情報ギャップがある場合
-    if state.get("has_information_gap", False):
-        return "complete"
-    
-    # 回答生成ステップ：最終回答がまだ生成されていない場合
-    if "final_response" not in state:
-        return "respond"
-    
-    # すべてのステップが完了
-    return "end"
-
 def gragh_build():
     """
     エージェントの処理フローを定義するグラフを構築する
@@ -450,22 +352,30 @@ def gragh_build():
     graph_builder.add_node("query_analyzer", query_analyzer_agent)
     graph_builder.add_node("search", search_agent)
     graph_builder.add_node("information_evaluator", information_evaluator_agent)
-    graph_builder.add_node("information_completer", information_completer_agent)
     graph_builder.add_node("response_generator", response_generator_agent)
     
     # エッジの追加：基本的なフロー
     graph_builder.add_edge(START, "query_analyzer")
     graph_builder.add_edge("query_analyzer", "search")
     graph_builder.add_edge("search", "information_evaluator")
-    # graph_builder.add_edge("information_evaluator", "information_completer")
-    graph_builder.add_edge("information_completer", "response_generator")
     graph_builder.add_edge("response_generator", END)
+
+    def check_condition(state: State) -> str:
+        # 情報ギャップがある場合は再度質問分析を行う
+        return_value = ""
+        if state.get("loop_count", 0) > 2:
+            return_value = "query_analyzer"
+        else:
+            if state.get("has_information_gap", False):
+                return_value = "query_analyzer"
+            # 情報ギャップがない場合は、回答生成エージェントに進む
+            return_value = "response_generator"
+        return return_value
     
     # コントローラーによる条件付きルーティング
     graph_builder.add_conditional_edges(
-        "information_evaluator",
-        lambda state: "response_generator" if state.get("has_information_gap", False) is False or state.get("loop_count", 0) > 2 else "query_analyzer",
-        {
+        "information_evaluator", check_condition, 
+        path_map={
             "query_analyzer": "query_analyzer",
             "response_generator": "response_generator"
         }

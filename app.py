@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-from agent import gragh_build, query_analyzer_agent, search_agent, information_evaluator_agent, information_completer_agent, response_generator_agent
+from agent import gragh_build
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from streamlit_mermaid import st_mermaid
@@ -151,8 +151,10 @@ with tab2:
     try:
         # LangGraphのメモリーダイドを取得して表示
         mermaid_code = gragh_build().get_graph().draw_mermaid()
-        # print(mermaid_code)  # デバッグ用
-        st_mermaid(mermaid_code, height=600)
+        
+        st.code(mermaid_code, language="mermaid")
+        st_mermaid(mermaid_code)
+
     except Exception as e:
         st.error(f"フローチャートの表示中にエラーが発生しました: {str(e)}")
         st.info("グラフ構造を表示するには、まずクエリを実行してください。")
