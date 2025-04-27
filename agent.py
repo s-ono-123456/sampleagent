@@ -110,13 +110,6 @@ def route_tools(
         return "tools"
     return END
 
-@tool
-def human_assistance(query: str) -> str:
-    """Request assistance from a human."""
-    human_response = interrupt({"query": query})
-    return human_response["data"]
-
-
 def gragh_build():
     # メインのグラフ構築
     # ステートグラフは状態遷移を管理します
@@ -155,13 +148,13 @@ def gragh_build():
 
 graph = gragh_build()
 
-
-
-
-user_input = "Hi there! My name is Will."
+# グラフ実行
+user_input = "受注処理の詳細を教えてください。"
 config = {"configurable": {"thread_id": "1"}}
 
 # The config is the **second positional argument** to stream() or invoke()!
+# Streamだとストリーミングモードで返却される。
+# Invokeだと一度に全てのメッセージが返却される。
 events = graph.stream(
     {"messages": [{"role": "user", "content": user_input}]},
     config,
@@ -170,8 +163,6 @@ events = graph.stream(
 for event in events:
     event["messages"][-1].pretty_print()
 
-snapshot = graph.get_state(config)
-print(snapshot)
 
 user_input = "Remember my name?"
 
@@ -183,6 +174,3 @@ events = graph.stream(
 )
 for event in events:
     event["messages"][-1].pretty_print()
-
-snapshot = graph.get_state(config)
-print(snapshot)
