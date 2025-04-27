@@ -492,19 +492,22 @@ def gragh_build():
     
     return graph
 
-graph = gragh_build()
 
-# グラフ実行
-user_input = "受注テーブルを利用している箇所を洗い出してください。"
-config = {"configurable": {"thread_id": "1"}}
+if __name__ == "__main__":
+    # グラフのビルド
+    graph = gragh_build()
 
-# The config is the **second positional argument** to stream() or invoke()!
-# Streamだとストリーミングモードで返却される。
-# Invokeだと一度に全てのメッセージが返却される。
-events = graph.stream(
-    {"messages": [{"role": "user", "content": user_input}]},
-    config,
-    stream_mode="values",
-)
-for event in events:
-    event["messages"][-1].pretty_print()
+    # グラフ実行
+    user_input = "受注テーブルを利用している箇所を洗い出してください。"
+    config = {"configurable": {"thread_id": "1"}}
+
+    # The config is the **second positional argument** to stream() or invoke()!
+    # Streamだとストリーミングモードで返却される。
+    # Invokeだと一度に全てのメッセージが返却される。
+    events = graph.stream(
+        {"messages": [{"role": "user", "content": user_input}]},
+        config,
+        stream_mode="values",
+    )
+    for event in events:
+        event["messages"][-1].pretty_print()
