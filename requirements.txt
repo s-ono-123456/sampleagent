@@ -10,3 +10,4 @@ langchain-huggingface
 langgraph
 langchain-tavily
 streamlit
+streamlit-mermaid
