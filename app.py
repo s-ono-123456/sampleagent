@@ -71,45 +71,50 @@ if user_input:
             
             # 詳細表示モードのための処理
             if show_raw_response:
-                # 手動でエージェントをステップバイステップで実行
-                with st.status("質問の分析中...", expanded=False) as status:
-                    # 質問分析
-                    state = {"messages": [HumanMessage(content=user_input)]}
-                    analysis_result = query_analyzer_agent(state)
-                    processing_results["analyzed_questions"] = analysis_result["questions"]
-                    status.update(label="質問分析完了", state="complete")
+                # Graphを使用しつつ、詳細情報を収集
+                processing_results = {
+                    "user_query": user_input,
+                    "analyzed_questions": [],
+                    "search_results": [],
+                    "final_response": None
+                }
                 
-                with st.status("関連情報の検索中...", expanded=False) as status:
-                    # 検索
-                    state.update(analysis_result)
-                    search_result = search_agent(state)
-                    processing_results["search_results"] = search_result["relevant_documents"]
-                    status.update(label="検索完了", state="complete")
-                
-                with st.status("情報の評価中...", expanded=False) as status:
-                    # 情報評価
-                    state.update(search_result)
-                    evaluation_result = information_evaluator_agent(state)
-                    processing_results["evaluation_results"] = evaluation_result
-                    status.update(label="評価完了", state="complete")
-                
-                with st.status("情報の補完中...", expanded=False) as status:
-                    # 情報補完（必要な場合）
-                    if evaluation_result.get("has_information_gap", False):
-                        state.update(evaluation_result)
-                        completion_result = information_completer_agent(state)
-                        state.update(completion_result)
-                        status.update(label="情報補完完了", state="complete")
-                    else:
-                        state.update(evaluation_result)
-                        status.update(label="補完不要", state="complete")
-                
-                with st.status("回答の生成中...", expanded=False) as status:
-                    # 回答生成
-                    response_result = response_generator_agent(state)
-                    final_response = response_result.get("final_response", "回答を生成できませんでした。")
-                    processing_results["final_response"] = final_response
-                    status.update(label="回答生成完了", state="complete")
+                with st.status("処理中...", expanded=True) as status:
+                    events = graph.stream(
+                        {"messages": [HumanMessage(content=user_input)]},
+                        config,
+                        stream_mode="values",
+                    )
+                    print("events:", events)
+                    # イベントをストリーミングして処理状況を更新
+                    for event in events:
+                        # ノード名を取得して状態を更新
+                        if "node_name" in event:
+                            node_name = event["node_name"]
+                            if node_name == "query_analyzer":
+                                status.update(label="質問の分析中...", state="running")
+                                if "questions" in event:
+                                    processing_results["analyzed_questions"] = event["questions"]
+                                    status.update(label="質問分析完了", state="complete")
+                            elif node_name == "search":
+                                status.update(label="関連情報の検索中...", state="running")
+                                if "relevant_documents" in event:
+                                    processing_results["search_results"] = event["relevant_documents"]
+                                    status.update(label="検索完了", state="complete")
+                            elif node_name == "information_evaluator":
+                                status.update(label="情報の評価中...", state="running")
+                            elif node_name == "information_completer":
+                                status.update(label="情報の補完中...", state="running")
+                            elif node_name == "response_generator":
+                                status.update(label="回答の生成中...", state="running")
+                        
+                        # 最終的な回答を取得
+                        if event.get("messages") and len(event["messages"]) > 0:
+                            final_message = event["messages"][-1]
+                            if hasattr(final_message, "content"):
+                                final_response = final_message.content
+                                processing_results["final_response"] = final_response
+                                status.update(label="処理完了", state="complete")
                 
                 # 詳細情報の表示
                 st.subheader("処理詳細")
@@ -129,7 +134,7 @@ if user_input:
                 
                 # 最終回答
                 st.write("【最終回答】")
-                message_placeholder.markdown(final_response)
+                message_placeholder.markdown(processing_results["final_response"])
             else:
                 # グラフを使った実行（通常モード）
                 events = graph.stream(
