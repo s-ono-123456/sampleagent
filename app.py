@@ -70,21 +70,14 @@ with tab1:
             
             try:
                 # 各エージェントの処理結果を保存するための辞書
-                processing_results = {
-                    "user_query": user_input,
-                    "analyzed_questions": None,
-                    "search_results": None,
-                    "evaluation_results": None,
-                    "final_response": None
-                }
-                
-                # 詳細表示モードのための処理
                 # Graphを使用しつつ、詳細情報を収集
                 processing_results = {
                     "user_query": user_input,
                     "analyzed_questions": [],
                     "search_results": [],
-                    "final_response": None
+                    "evaluation_results": None,
+                    "final_response": None,
+                    "check_result": None,
                 }
                 endflg = False
                 with st.status("処理中...", expanded=True) as status:
@@ -107,18 +100,18 @@ with tab1:
                             status.update(label="情報の補完中...", state="running")
                         elif node_name == "response_generator":
                             status.update(label="回答の生成中...", state="running")
+                        elif node_name == "response_evaluate":
+                            status.update(label="回答の評価中...", state="running")
                             endflg = True
                         elif node_name == "":
                             status.update(label="呼び出し中...", state="running")
                         
                         # 最終的な回答を取得
                         if endflg and chunk.get("messages") and len(chunk["messages"]) > 0:
-                            final_message = chunk["messages"][-1]
                             useful_documents = chunk['useful_documents']
-                            if hasattr(final_message, "content"):
-                                final_response = final_message.content
-                                processing_results["final_response"] = final_response
-                                status.update(label="処理完了", state="complete")
+                            processing_results["final_response"] = chunk['final_response']
+                            processing_results["check_result"] = chunk['check_result']
+                            status.update(label="処理完了", state="complete")
                 
                 # 詳細情報の表示
                 st.subheader("処理詳細")
@@ -132,6 +125,8 @@ with tab1:
                 
                 # 最終回答
                 message_placeholder.markdown(processing_results["final_response"])
+                st.write("【回答評価】")
+                st.write(processing_results["check_result"])        
                 
                 # チャット履歴に回答を追加
                 st.session_state.messages.append({"role": "assistant", "content": processing_results["final_response"] if processing_results["final_response"] else "回答を生成できませんでした。"})

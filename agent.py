@@ -115,6 +115,8 @@ class State(TypedDict):
     final_response: str
     # 最後のノード情報
     last_node: str = ""
+    # 最終回答のチェック
+    check_result: str
 
 # 各専門エージェントの実装
 
@@ -338,6 +340,52 @@ def response_generator_agent(state: State):
         "last_node": "response_generator",
     }
 
+def response_evaluate_agent(state: State):
+    """
+    回答精度判断エージェント
+    収集した回答が質問に答えられているかを判断する。
+    
+    Args:
+        state: 現在の状態
+        
+    Returns:
+        更新された状態（最終回答を追加）
+    """
+    messages = state["messages"]
+    user_query = messages[-1].content if isinstance(messages[-1].content, str) else messages[-1].content[0].text
+    final_response = state["final_response"]
+    
+    # 関連文書を文字列として連結
+    
+    # LLMを使用して回答を生成
+    system_message = """
+    あなたは回答内容をチェックする専門家です。
+    ユーザーの質問と回答内容を分析し、適切に質問に回答出来ているかをチェックしてください。
+    チェック内容には以下の要素を含めてください：
+    1. 質問で求められている内容を満たせているか
+    2. 回答内容に不足している内容はないか
+    3. 情報の出典が正しく記載されているか
+    
+    回答は日本語で、わかりやすく構造化してください。
+    """
+    
+    check_prompt = [
+        SystemMessage(content=system_message),
+        HumanMessage(content=f"質問: {user_query}\n\n回答:\n{final_response}")
+    ]
+    
+    check_result = llm.invoke(check_prompt)
+    
+    # 回答を抽出
+    check_result = check_result.content
+    
+    # 状態を更新
+    return {
+        "check_result": check_result,
+        "messages": [AIMessage(content=check_result)],
+        "last_node": "response_evaluate",
+    }
+
 def gragh_build():
     """
     エージェントの処理フローを定義するグラフを構築する
@@ -353,11 +401,13 @@ def gragh_build():
     graph_builder.add_node("search", search_agent)
     graph_builder.add_node("information_evaluator", information_evaluator_agent)
     graph_builder.add_node("response_generator", response_generator_agent)
+    graph_builder.add_node("response_evaluate", response_evaluate_agent)
     
     # エッジの追加：基本的なフロー
     graph_builder.add_edge(START, "query_analyzer")
     graph_builder.add_edge("query_analyzer", "search")
     graph_builder.add_edge("search", "information_evaluator")
+    graph_builder.add_edge("response_generator", "response_evaluate")
     graph_builder.add_edge("response_generator", END)
 
     def check_condition(state: State) -> str:
