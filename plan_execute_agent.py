@@ -20,18 +20,29 @@ os.environ["LANGSMITH_PROJECT"] = "Plan and Execute agent"
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
+# 定数の定義
+MAX_REVISION_COUNT = 2  # 再計画の最大回数
+MODEL_NAME = "gpt-4.1-nano"  # 使用するモデル名
+
 # プロンプトテンプレートの定義
 # 計画作成用プロンプト
 PLAN_PROMPT_TEMPLATE = """\
 あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
-ユーザーからの以下の質問に答えるための調査計画を作成してください。
+ユーザーからの以下の依頼事項に答えるための調査計画を作成してください。
 
-質問: {query}
+依頼事項: {query}
 
-計画は以下のステップに分解してください:
-1. 必要な情報を特定するための検索ステップ (action_type: search)
-2. 収集した情報を分析するためのステップ (action_type: analyze)
-3. 最終的な回答を生成するための統合ステップ (action_type: synthesize)
+与えられた依頼事項に対して、単純なステップバイステップな計画を作成してください。
+この計画は正しく実行すれば正しい答えを導き出せるような個々のタスクで構成されている必要があります。
+余計な手順は追加しないでください。
+最終ステップの結果が最終的な答えになるようにしてください。
+各ステップには必要な情報をすべて含めて、スキップしないようにしてください。
+
+計画の中では以下のステップを利用することができます。
+1回のステップの中に複数回のアクションを含むこともできます。
+- 必要な情報を特定するための検索ステップ (step_type: search)
+- 収集した情報を分析するためのステップ (step_type: analyze)
+- 最終的な回答を生成するための統合ステップ (step_type: synthesize)
 """
 
 # 検索クエリ生成用プロンプト
@@ -121,6 +132,7 @@ class AgentState(BaseModel):
     information_sufficient: bool = Field(default=True, description="収集した情報が十分かどうか")
     final_answer: Optional[str] = Field(default=None, description="最終的な回答")
     next_step: str = Field(default=None, description="次に実行すべきステップ")
+    revision_count: int = Field(default=0, description="計画修正の回数")
 
 # 計画のステップを表すモデル
 class PlanStep(BaseModel):
@@ -150,7 +162,7 @@ class InformationSufficiencyAssessment(BaseModel):
 # 計画作成ノード
 def create_plan(state: AgentState) -> AgentState:
     """ユーザーの質問から実行計画を作成するノード"""
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # プロンプトテンプレートを使用
     plan_prompt = ChatPromptTemplate.from_template(PLAN_PROMPT_TEMPLATE)
@@ -183,7 +195,7 @@ def execute_step(state: AgentState) -> AgentState:
     step_description = current_step.get("description", "")
     
     # LLMの初期化
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # アクションタイプに基づいて実行
     result = ""
@@ -284,7 +296,7 @@ def execute_step(state: AgentState) -> AgentState:
 def search_documents(step_description: str, query: str) -> str:
     """ベクトルストアを使用して関連文書を検索"""
     # LLMの初期化
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # プロンプトテンプレートを使用
     search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT_TEMPLATE)
@@ -358,7 +370,7 @@ def evaluate_plan(state: AgentState) -> str:
 # 計画修正ノード
 def revise_plan(state: AgentState) -> AgentState:
     """実行結果に基づいて計画を修正"""
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # 実行結果のフォーマット
     execution_results_text = "\n".join([\
@@ -404,7 +416,7 @@ def revise_plan(state: AgentState) -> AgentState:
 # 情報充足度評価ノード
 def assess_information_sufficiency(state: AgentState) -> AgentState:
     """収集した情報の充足度を評価し、再計画の必要性を判断する"""
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # 分析ステップ（action_type: analyze）の結果のみを抽出
     analyze_results = []
@@ -464,21 +476,35 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
         "reason": reason
     }
     
+    # 再計画回数を更新
+    revision_count = state.revision_count
+    
     # 判断結果に基づいて次のステップを設定
-    if need_more_research:
+    if need_more_research and revision_count < MAX_REVISION_COUNT:
+        # 再計画が必要かつ最大回数未満の場合
         next_step = "revise_plan"
         information_sufficient = False
-    else:
+        revision_count += 1
+        reason_message = reason
+    elif need_more_research and revision_count >= MAX_REVISION_COUNT:
+        # 再計画が必要だが最大回数に達した場合、強制的に回答生成へ
         next_step = "generate_answer"
         information_sufficient = True
+        reason_message = f"再計画の最大回数({MAX_REVISION_COUNT}回)に達したため、現在の情報で回答を生成します。\n" + reason
+    else:
+        # 情報が十分な場合
+        next_step = "generate_answer"
+        information_sufficient = True
+        reason_message = reason
     
     # 状態を更新して返す
     return {
         "next_step": next_step,
         "information_sufficient": information_sufficient,
+        "revision_count": revision_count,
         "execution_results": state.execution_results + [{
             "step": {"step_number": len(state.execution_results) + 1, "description": "情報充足度評価", "action_type": "evaluate"},
-            "result": f"充足度評価: {sufficiency_score}/5 - {'十分' if information_sufficient else '不十分'}\n理由: {reason}",
+            "result": f"充足度評価: {sufficiency_score}/5 - {'十分' if information_sufficient else '不十分'}\n理由: {reason_message}",
             "success": True,
             "assessment_details": assessment_details
         }]
@@ -487,7 +513,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
 # 回答生成ノード
 def generate_answer(state: AgentState) -> AgentState:
     """実行結果から最終回答を生成"""
-    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # 実行結果のフォーマット
     all_results = "\n\n".join([
@@ -563,7 +589,7 @@ class PlanExecuteAgent:
     """
     LangGraphを使用したPlan and Execute型のAIエージェント
     """
-    def __init__(self, model_name: str = "gpt-4.1-nano", temperature: float = 0.0):
+    def __init__(self, model_name: str = MODEL_NAME, temperature: float = 0.0):
         """
         AIエージェントの初期化
         
