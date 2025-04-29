@@ -94,6 +94,23 @@ ANALYZE_PROMPT_TEMPLATE = """\
 分析結果:
 """
 
+# ステップ結論生成用プロンプト
+STEP_CONCLUSION_PROMPT_TEMPLATE = """
+以下の情報を分析し、ステップのまとめを整理してください。
+後でユーザの質問に答えることを想定して、必要な情報をまとめてください。
+
+ステップ: {step_description}
+質問: {query}
+
+収集した情報:
+{collected_info}
+
+回答は明確で簡潔、かつ情報に富んだものにしてください。
+設計書の内容に基づいて事実を述べ、根拠となる情報を含めてください。
+
+まとめ:
+"""
+
 # 計画修正用プロンプト
 REVISION_PROMPT_TEMPLATE = """\
 次の計画を実行中に問題が発生しました。より効果的な計画を提案してください。
@@ -164,6 +181,7 @@ class AgentState(BaseModel):
     final_answer: Optional[str] = Field(default=None, description="最終的な回答")
     next_step: str = Field(default=None, description="次に実行すべきステップ")
     revision_count: int = Field(default=0, description="計画修正の回数")
+    conclusion_results: List[Dict[str, Any]] = Field(default_factory=list, description="ステップの結果リスト")
 
 # 計画のステップを表すモデル
 class MainPlanStep(BaseModel):
@@ -408,23 +426,63 @@ def execute_analyze_step(state: AgentState) -> AgentState:
 
 def execute_synthesize_step(state: AgentState) -> AgentState:
     """統合ステップの実行"""
+
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_description = current_step.get("description", "")
     
-    # 統合ステップは特別な処理をせず、後で実行される
-    execution_result = {
-        "result": "統合ステップは後で実行されます",
-        "success": True
-    }
+    # LLMの初期化
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
+    
+    # これまでの情報を分析
+    collected_info = "\n\n".join([
+        f"検索結果 {i+1}: {r.get('result', '')}" 
+        for i, r in enumerate(state.execution_results)
+        if r.get("step", {}).get("step_type", "") == "search"
+    ])
+    
+    try:
+        if not collected_info:
+            step_conclusion_result = "統合する情報がありません。検索ステップが失敗したか、実行されていません。"
+            success = False
+        else:
+            # プロンプトテンプレートを使用
+            step_conclusion_prompt = ChatPromptTemplate.from_template(STEP_CONCLUSION_PROMPT_TEMPLATE)
+            
+            step_conclusion_chain = step_conclusion_prompt | llm | StrOutputParser()
+            step_conclusion_result = step_conclusion_chain.invoke({
+                "step_description": step_description,
+                "query": state.query,
+                "collected_info": collected_info
+            })
+            
+            success = True
+
+        step_conclusion_result = {
+            "step": current_step,
+            "conclusion_results": step_conclusion_result,
+            "success": success
+        }
+            
+    except Exception as e:
+        step_conclusion_result = f"統合中にエラーが発生しました: {str(e)}"
+        step_conclusion_result = {
+            "step": current_step,
+            "conclusion_results": step_conclusion_result,
+            "success": False
+        }
     
     # 実行結果を記録
-    execution_results = state.execution_results.copy()
-    execution_results.append(execution_result)
+    conclusion_results = state.conclusion_results.copy()
+    conclusion_results.append(step_conclusion_result)
     
     # 次のステップへ
     return {
         "current_substep_index": 0,
         "current_step_index": state.current_step_index + 1,
-        "execution_results": execution_results,
-        "need_plan_revision": False
+        "execution_results": [],
+        "need_plan_revision": not step_conclusion_result["success"],
+        "conclusion_results": conclusion_results
     }
 
 def execute_unknown_step(state: AgentState) -> AgentState:
@@ -535,7 +593,7 @@ def execute_step(state: AgentState) -> AgentState:
     # サブグラフの構築
     execution_subgraph = build_execution_subgraph()
     mermaid_code = execution_subgraph.get_graph().draw_mermaid()
-    print(f"サブエージェントのグラフ:\n{mermaid_code}")
+    # print(f"サブエージェントのグラフ:\n{mermaid_code}")
     
     # サブグラフを実行
     result = execution_subgraph.invoke(state)
@@ -605,36 +663,21 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     """収集した情報の充足度を評価し、再計画の必要性を判断する"""
     llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
-    # 分析ステップ（step_type: analyze）の結果のみを抽出
-    analyze_results = []
-    
+    # 分析ステップ（step_type: synthesis）の結果のみを抽出
+    conclusion_results = []
+
     # 現在の計画のanalyzeステップの結果
-    current_analyze_results = [
-        f"ステップ {r.get('step', {}).get('step_number', i+1)} (洞察): {r.get('result', '')}"
-        for i, r in enumerate(state.execution_results)
-        if r.get('step', {}).get('step_type', '') == 'analyze'
-    ]
-    
-    analyze_results.extend(current_analyze_results)
-    
-    # 以前の計画のanalyzeステップの結果も抽出
-    # 現在の計画のanalyzeステップではない古い実行結果を取得
-    previous_results_slice = state.execution_results[:-len(current_analyze_results)] if current_analyze_results else state.execution_results
-    previous_analyze_results = [
-        f"以前の計画からの洞察 {i+1}: {r.get('result', '')}"
-        for i, r in enumerate(previous_results_slice)
-        if r.get('step', {}).get('step_type', '') == 'analyze'
-    ]
-    
-    if previous_analyze_results:
-        analyze_results.extend(previous_analyze_results)
+    for i, result in enumerate(state.conclusion_results):
+        conclusion_results.append(
+            f"ステップ {result.get('step', {}).get('step_number', i+1)} (洞察): {result.get('conclusion_results', '')}"
+        )
     
     # 分析結果がない場合は適切なメッセージを設定
-    if not analyze_results:
-        analyze_results = ["洞察が得られていません。検索結果からの分析が実行されていないか失敗しました。"]
+    if not conclusion_results:
+        conclusion_results = ["洞察が得られていません。検索結果からの分析が実行されていないか失敗しました。"]
     
     # 洞察結果のフォーマット
-    all_insights = "\n\n".join(analyze_results)
+    all_insights = "\n\n".join(conclusion_results)
     
     # 情報充足度評価プロンプト
     assessment_prompt = ChatPromptTemplate.from_template(ASSESSMENT_PROMPT_TEMPLATE)
@@ -703,28 +746,26 @@ def generate_answer(state: AgentState) -> AgentState:
     llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
     # 実行結果のフォーマット
-    all_results = "\n\n".join([
-        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
-        f"({r.get('step', {}).get('step_type', 'unknown')}): {r.get('result', '')}"
-        for i, r in enumerate(state.execution_results)
-    ])
-    
+    all_results = []
+    # 現在の計画のanalyzeステップの結果
+    for i, result in enumerate(state.conclusion_results):
+        all_results.append(
+            f"ステップ {result.get('step', {}).get('step_number', i+1)} (洞察): {result.get('conclusion_results', '')}"
+        )
+
     # 回答生成プロンプト
     answer_prompt = ChatPromptTemplate.from_template(ANSWER_PROMPT_TEMPLATE)
     
     # 回答の生成
-    answer_chain = answer_prompt | llm
+    answer_chain = answer_prompt | llm | StrOutputParser()
     answer_result = answer_chain.invoke({
         "query": state.query,
         "all_results": all_results
     })
     
-    # 回答テキストを抽出
-    final_answer = answer_result.content if hasattr(answer_result, 'content') else str(answer_result)
-    
     # 状態を更新して返す
     return {
-        "final_answer": final_answer
+        "final_answer": answer_result
     }
 
 # グラフの構築
@@ -834,7 +875,7 @@ if __name__ == "__main__":
         # 計画の表示
         print("【計画】")
         for i, step in enumerate(result["main_plan"]):
-            print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')} ({step.get('step_type', 'unknown')})")
+            print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')}")
         print("\n")
         
         # 最終回答の表示
