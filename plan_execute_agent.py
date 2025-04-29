@@ -9,7 +9,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import FAISS
 from pydantic import BaseModel, Field
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from vector_store_loader import load_vector_stores
 
 
@@ -24,7 +24,10 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 MAX_REVISION_COUNT = 2  # 再計画の最大回数
 MODEL_NAME = "gpt-4.1-nano"  # 使用するモデル名
 
+###########################################################################
 # プロンプトテンプレートの定義
+###########################################################################
+
 # 計画作成用プロンプト
 PLAN_PROMPT_TEMPLATE = """\
 あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
@@ -124,6 +127,10 @@ ANSWER_PROMPT_TEMPLATE = """
 回答:
 """
 
+###########################################################################
+# Pydanticモデルの定義
+###########################################################################
+
 # エージェントの状態を定義するPydanticモデル
 class AgentState(BaseModel):
     """LangGraphで使用するエージェントの状態"""
@@ -164,138 +171,9 @@ class InformationSufficiencyAssessment(BaseModel):
     need_more_research: bool = Field(description="再調査が必要かどうか")
     reason: str = Field(description="再調査が必要な理由や十分と判断した理由")
 
-# 計画作成ノード
-def create_plan(state: AgentState) -> AgentState:
-    """ユーザーの質問から実行計画を作成するノード"""
-    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
-    
-    # プロンプトテンプレートを使用
-    plan_prompt = ChatPromptTemplate.from_template(PLAN_PROMPT_TEMPLATE)
-    
-    # with_structured_outputを使用してPlan形式での出力を強制
-    structured_llm = llm.with_structured_output(Plan)
-    
-    # チェーンを実行して計画を生成
-    plan_chain = plan_prompt | structured_llm
-    plan_result = plan_chain.invoke({"query": state.query})
-    
-    # Planオブジェクトをリストに変換
-    steps = [step.model_dump() for step in plan_result.steps]
-    
-    # 状態を更新して返す
-    return {
-        "main_plan": steps
-    }
-
-# タスク実行ノード
-def execute_step(state: AgentState) -> AgentState:
-    """計画の各ステップを実行するノード"""
-    # 全ステップが完了していたら何もしない
-    if state.current_step_index >= len(state.main_plan):
-        return state
-    
-    # 現在のステップを取得
-    current_step = state.main_plan[state.current_step_index]
-    step_type = current_step.get("step_type", "")
-    step_description = current_step.get("description", "")
-    
-    # LLMの初期化
-    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
-    
-    # アクションタイプに基づいて実行
-    result = ""
-    success = True
-    execution_result = {}
-    
-    try:
-        if step_type == "search":
-            # 検索の実行（結果と検索クエリを取得）
-            search_result = search_documents(step_description, state.query)
-            
-            # 検索結果とクエリがタプルとして返される場合の処理
-            result, search_queries = search_result
-            # 検索クエリを実行結果に含める
-            execution_result = {
-                "step": current_step,
-                "result": result,
-                "success": bool(result) and "情報が見つかりません" not in result,
-                "search_queries": search_queries
-            }
-            
-            success = execution_result["success"]
-            
-        elif step_type == "analyze":
-            # これまでの情報を分析
-            collected_info = "\n\n".join([
-                f"検索結果 {i+1}: {r.get('result', '')}" 
-                for i, r in enumerate(state.execution_results)
-                if r.get("step", {}).get("step_type", "") == "search"
-            ])
-            
-            if not collected_info:
-                result = "分析する情報がありません。検索ステップが失敗したか、実行されていません。"
-                success = False
-            else:
-                # プロンプトテンプレートを使用
-                analyze_prompt = ChatPromptTemplate.from_template(ANALYZE_PROMPT_TEMPLATE)
-                
-                analyze_chain = analyze_prompt | llm
-                analyze_result = analyze_chain.invoke({
-                    "step_description": step_description,
-                    "query": state.query,
-                    "collected_info": collected_info
-                })
-                
-                result = analyze_result.content if hasattr(analyze_result, 'content') else str(analyze_result)
-                success = True
-            
-            execution_result = {
-                "step": current_step,
-                "result": result,
-                "success": success
-            }
-                
-        elif step_type == "synthesize":
-            # 統合ステップは特別な処理をしない
-            result = "統合ステップは後で実行されます"
-            execution_result = {
-                "step": current_step,
-                "result": result,
-                "success": True
-            }
-            
-        else:
-            # 不明なアクションタイプ
-            result = f"不明なアクションタイプ: {step_type}"
-            execution_result = {
-                "step": current_step,
-                "result": result,
-                "success": False
-            }
-            success = False
-            
-    except Exception as e:
-        result = f"実行中にエラーが発生しました: {str(e)}"
-        execution_result = {
-            "step": current_step,
-            "result": result,
-            "success": False
-        }
-        success = False
-    
-    # 実行結果を記録
-    execution_results = state.execution_results.copy()
-    execution_results.append(execution_result)
-    
-    # 次のステップへ、または計画修正が必要かどうかを判断
-    need_revision = not success
-    
-    # 状態を更新して返す
-    return {
-        "current_step_index": state.current_step_index + 1,
-        "execution_results": execution_results,
-        "need_plan_revision": need_revision
-    }
+###########################################################################
+# サブグラフノードの定義
+###########################################################################
 
 # ベクトル検索関数
 def search_documents(step_description: str, query: str) -> str:
@@ -361,6 +239,245 @@ def search_documents(step_description: str, query: str) -> str:
     
     # UI表示用に検索クエリを返す
     return result_text, search_queries
+
+# サブグラフの各ノード（ステップタイプごとの処理関数）
+def execute_search_step(state: AgentState) -> AgentState:
+    """検索ステップの実行"""
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_description = current_step.get("description", "")
+    
+    try:
+        # 検索の実行（結果と検索クエリを取得）
+        search_result = search_documents(step_description, state.query)
+        
+        # 検索結果とクエリを取得
+        result, search_queries = search_result
+        # 検索クエリを実行結果に含める
+        execution_result = {
+            "step": current_step,
+            "result": result,
+            "success": bool(result) and "情報が見つかりません" not in result,
+            "search_queries": search_queries
+        }
+        
+    except Exception as e:
+        result = f"検索中にエラーが発生しました: {str(e)}"
+        execution_result = {
+            "step": current_step,
+            "result": result,
+            "success": False
+        }
+    
+    # 実行結果を記録
+    execution_results = state.execution_results.copy()
+    execution_results.append(execution_result)
+    
+    # 次のステップへ、または計画修正が必要かどうかを判断
+    return {
+        "current_step_index": state.current_step_index + 1,
+        "execution_results": execution_results,
+        "need_plan_revision": not execution_result["success"]
+    }
+
+def execute_analyze_step(state: AgentState) -> AgentState:
+    """分析ステップの実行"""
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_description = current_step.get("description", "")
+    
+    # LLMの初期化
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
+    
+    # これまでの情報を分析
+    collected_info = "\n\n".join([
+        f"検索結果 {i+1}: {r.get('result', '')}" 
+        for i, r in enumerate(state.execution_results)
+        if r.get("step", {}).get("step_type", "") == "search"
+    ])
+    
+    try:
+        if not collected_info:
+            result = "分析する情報がありません。検索ステップが失敗したか、実行されていません。"
+            success = False
+        else:
+            # プロンプトテンプレートを使用
+            analyze_prompt = ChatPromptTemplate.from_template(ANALYZE_PROMPT_TEMPLATE)
+            
+            analyze_chain = analyze_prompt | llm
+            analyze_result = analyze_chain.invoke({
+                "step_description": step_description,
+                "query": state.query,
+                "collected_info": collected_info
+            })
+            
+            result = analyze_result.content if hasattr(analyze_result, 'content') else str(analyze_result)
+            success = True
+        
+        execution_result = {
+            "step": current_step,
+            "result": result,
+            "success": success
+        }
+            
+    except Exception as e:
+        result = f"分析中にエラーが発生しました: {str(e)}"
+        execution_result = {
+            "step": current_step,
+            "result": result,
+            "success": False
+        }
+    
+    # 実行結果を記録
+    execution_results = state.execution_results.copy()
+    execution_results.append(execution_result)
+    
+    # 次のステップへ、または計画修正が必要かどうかを判断
+    return {
+        "current_step_index": state.current_step_index + 1,
+        "execution_results": execution_results,
+        "need_plan_revision": not execution_result["success"]
+    }
+
+def execute_synthesize_step(state: AgentState) -> AgentState:
+    """統合ステップの実行"""
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    
+    # 統合ステップは特別な処理をせず、後で実行される
+    execution_result = {
+        "step": current_step,
+        "result": "統合ステップは後で実行されます",
+        "success": True
+    }
+    
+    # 実行結果を記録
+    execution_results = state.execution_results.copy()
+    execution_results.append(execution_result)
+    
+    # 次のステップへ
+    return {
+        "current_step_index": state.current_step_index + 1,
+        "execution_results": execution_results,
+        "need_plan_revision": False
+    }
+
+def execute_unknown_step(state: AgentState) -> AgentState:
+    """不明なステップタイプの実行（エラー処理）"""
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_type = current_step.get("step_type", "")
+    
+    # 不明なアクションタイプ
+    execution_result = {
+        "step": current_step,
+        "result": f"不明なアクションタイプ: {step_type}",
+        "success": False
+    }
+    
+    # 実行結果を記録
+    execution_results = state.execution_results.copy()
+    execution_results.append(execution_result)
+    
+    # 次のステップへ、修正が必要
+    return {
+        "current_step_index": state.current_step_index + 1,
+        "execution_results": execution_results,
+        "need_plan_revision": True
+    }
+
+# 実行するステップタイプを判断する関数
+def determine_step_type(state: AgentState) -> str:
+    """現在のステップタイプを判断し、対応するノード名を返す"""
+    # 全ステップが完了していたら終了
+    if state.current_step_index >= len(state.main_plan):
+        return "completed"
+    
+    # 現在のステップタイプを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_type = current_step.get("step_type", "")
+    
+    # ステップタイプに基づいてノード名を返す
+    if step_type == "search":
+        return "execute_search"
+    elif step_type == "analyze":
+        return "execute_analyze"
+    elif step_type == "synthesize":
+        return "execute_synthesize"
+    else:
+        return "execute_unknown"
+
+# サブグラフ構築関数
+def build_execution_subgraph():
+    """ステップ実行のためのサブグラフを構築"""
+    # サブグラフの作成
+    execution_graph = StateGraph(AgentState)
+    
+    # ノードの追加
+    execution_graph.add_node("execute_search", execute_search_step)
+    execution_graph.add_node("execute_analyze", execute_analyze_step)
+    execution_graph.add_node("execute_synthesize", execute_synthesize_step)
+    execution_graph.add_node("execute_unknown", execute_unknown_step)
+
+    
+    # 条件分岐の設定
+    path_map = {
+            "execute_search": "execute_search",
+            "execute_analyze": "execute_analyze",
+            "execute_synthesize": "execute_synthesize",
+            "execute_unknown": "execute_unknown",
+            "completed": END
+        }
+    # エントリーポイントからの条件分岐
+    execution_graph.add_conditional_edges(START, determine_step_type,path_map=path_map)
+    execution_graph.add_conditional_edges("execute_search", determine_step_type,path_map=path_map)
+    execution_graph.add_conditional_edges("execute_analyze", determine_step_type,path_map=path_map)
+    execution_graph.add_conditional_edges("execute_synthesize", determine_step_type,path_map=path_map)
+    # 不明なタイプの場合はサブグラフを終わらせて再計画を促す必要がある。
+    execution_graph.add_edge("execute_unknown", END)
+    
+    # サブグラフをコンパイルして返す
+    return execution_graph.compile(name='SubAgentGraph', description='サブエージェントの実行グラフ')
+
+###########################################################################
+# メイングラフノードの定義
+###########################################################################
+
+# 計画作成ノード
+def create_plan(state: AgentState) -> AgentState:
+    """ユーザーの質問から実行計画を作成するノード"""
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
+    
+    # プロンプトテンプレートを使用
+    plan_prompt = ChatPromptTemplate.from_template(PLAN_PROMPT_TEMPLATE)
+    
+    # with_structured_outputを使用してPlan形式での出力を強制
+    structured_llm = llm.with_structured_output(Plan)
+    
+    # チェーンを実行して計画を生成
+    plan_chain = plan_prompt | structured_llm
+    plan_result = plan_chain.invoke({"query": state.query})
+    
+    # Planオブジェクトをリストに変換
+    steps = [step.model_dump() for step in plan_result.steps]
+    
+    # 状態を更新して返す
+    return {
+        "main_plan": steps
+    }
+# タスク実行ノード (メインの実行ノード、サブグラフを呼び出す)
+def execute_step(state: AgentState) -> AgentState:
+    """計画の各ステップを実行するノード (サブグラフを使用)"""
+    # サブグラフの構築
+    execution_subgraph = build_execution_subgraph()
+    mermaid_code = execution_subgraph.get_graph().draw_mermaid()
+    print(f"サブエージェントのグラフ:\n{mermaid_code}")
+    
+    # サブグラフを実行
+    result = execution_subgraph.invoke(state)
+    
+    # サブグラフの結果を返す
+    return result
 
 # 計画評価ノード
 def evaluate_plan(state: AgentState) -> str:
@@ -588,7 +705,7 @@ def build_agent_graph():
     workflow.set_entry_point("create_plan")
     
     # コンパイルしてグラフを返す
-    return workflow.compile()
+    return workflow.compile(name='MainAgentGraph' , description='メインエージェントの実行グラフ')
 
 class PlanExecuteAgent:
     """
@@ -608,7 +725,7 @@ class PlanExecuteAgent:
         # グラフの構築
         self.agent_graph = build_agent_graph()
         mermaid_code = self.agent_graph.get_graph().draw_mermaid()
-        # print(f"エージェントのグラフ:\n{mermaid_code}")
+        print(f"エージェントのグラフ:\n{mermaid_code}")
     
     def run(self, query: str) -> Dict[str, Any]:
         """
@@ -630,7 +747,7 @@ class PlanExecuteAgent:
         return {
             "status": "success",
             "query": query,
-            "plan": result['plan'],
+            "main_plan": result['main_plan'],
             "execution_results": result['execution_results'],
             "answer": result['final_answer']
         }
