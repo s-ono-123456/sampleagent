@@ -354,27 +354,51 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     """収集した情報の充足度を評価し、再計画の必要性を判断する"""
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
-    # 実行結果のフォーマット
-    all_results = "\n\n".join([
-        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
-        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
+    # 分析ステップ（action_type: analyze）の結果のみを抽出
+    analyze_results = []
+    
+    # 現在の計画のanalyzeステップの結果
+    current_analyze_results = [
+        f"ステップ {r.get('step', {}).get('step_number', i+1)} (洞察): {r.get('result', '')}"
         for i, r in enumerate(state.execution_results)
-    ])
+        if r.get('step', {}).get('action_type', '') == 'analyze'
+    ]
+    
+    analyze_results.extend(current_analyze_results)
+    
+    # 以前の計画のanalyzeステップの結果も抽出
+    # 現在の計画のanalyzeステップではない古い実行結果を取得
+    previous_results_slice = state.execution_results[:-len(current_analyze_results)] if current_analyze_results else state.execution_results
+    previous_analyze_results = [
+        f"以前の計画からの洞察 {i+1}: {r.get('result', '')}"
+        for i, r in enumerate(previous_results_slice)
+        if r.get('step', {}).get('action_type', '') == 'analyze'
+    ]
+    
+    if previous_analyze_results:
+        analyze_results.extend(previous_analyze_results)
+    
+    # 分析結果がない場合は適切なメッセージを設定
+    if not analyze_results:
+        analyze_results = ["洞察が得られていません。検索結果からの分析が実行されていないか失敗しました。"]
+    
+    # 洞察結果のフォーマット
+    all_insights = "\n\n".join(analyze_results)
     
     # 情報充足度評価プロンプト
     assessment_prompt = ChatPromptTemplate.from_template("""
-    あなたは質問に回答するために収集された情報の充足度を評価するAIアシスタントです。
-    ユーザーの質問に対して、以下の情報が十分であるかどうかを評価してください。
+    あなたは質問に回答するために得られた洞察の充足度を評価するAIアシスタントです。
+    ユーザーの質問に対して、以下の洞察が十分であるかどうかを評価してください。
 
     質問: {query}
     
-    収集した情報:
-    {all_results}
+    得られた洞察:
+    {all_insights}
     
-    以下の評価基準に基づいて収集した情報の充足度を評価してください:
+    以下の評価基準に基づいて得られた洞察の充足度を評価してください:
     1. **網羅性**: 質問に関連するすべての重要な側面がカバーされているか
     2. **一貫性**: 矛盾する情報がないか
-    3. **適切性**: 情報が質問に直接関連しているか
+    3. **適切性**: 洞察が質問に直接関連しているか
     4. **詳細度**: 質問に答えるために十分な詳細情報が含まれているか
     5. **最新性**: 情報が最新かどうか（もし判断できる場合）
     
@@ -390,7 +414,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     assessment_chain = assessment_prompt | structured_llm
     assessment_result = assessment_chain.invoke({
         "query": state.query,
-        "all_results": all_results
+        "all_insights": all_insights
     })
     
     # 構造化された評価結果からデータを取得
