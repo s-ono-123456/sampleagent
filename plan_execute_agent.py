@@ -128,7 +128,7 @@ ANSWER_PROMPT_TEMPLATE = """
 class AgentState(BaseModel):
     """LangGraphで使用するエージェントの状態"""
     query: str = Field(description="ユーザーからの質問")
-    plan: List[Dict[str, Any]] = Field(default_factory=list, description="解決のための計画ステップ")
+    main_plan: List[Dict[str, Any]] = Field(default_factory=list, description="解決のためのメイン計画ステップ")
     current_step_index: int = Field(default=0, description="現在実行中のステップのインデックス")
     execution_results: List[Dict[str, Any]] = Field(default_factory=list, description="実行結果のリスト")
     need_plan_revision: bool = Field(default=False, description="計画修正が必要かどうか")
@@ -184,18 +184,18 @@ def create_plan(state: AgentState) -> AgentState:
     
     # 状態を更新して返す
     return {
-        "plan": steps
+        "main_plan": steps
     }
 
 # タスク実行ノード
 def execute_step(state: AgentState) -> AgentState:
     """計画の各ステップを実行するノード"""
     # 全ステップが完了していたら何もしない
-    if state.current_step_index >= len(state.plan):
+    if state.current_step_index >= len(state.main_plan):
         return state
     
     # 現在のステップを取得
-    current_step = state.plan[state.current_step_index]
+    current_step = state.main_plan[state.current_step_index]
     step_type = current_step.get("step_type", "")
     step_description = current_step.get("description", "")
     
@@ -367,7 +367,7 @@ def evaluate_plan(state: AgentState) -> str:
     """計画の状態を評価し、次に実行すべきノードを決定"""
     if state.need_plan_revision:
         return "revise_plan"
-    elif state.current_step_index < len(state.plan):
+    elif state.current_step_index < len(state.main_plan):
         return "execute_step"
     else:
         return "assess_information_sufficiency"
@@ -395,7 +395,7 @@ def revise_plan(state: AgentState) -> AgentState:
         revision_chain = revision_prompt | structured_llm
         revision_result = revision_chain.invoke({
             "query": state.query,
-            "original_plan": json.dumps(state.plan, ensure_ascii=False),
+            "original_plan": json.dumps(state.main_plan, ensure_ascii=False),
             "execution_results": execution_results_text
         })
         
@@ -414,7 +414,7 @@ def revise_plan(state: AgentState) -> AgentState:
     # 状態を更新して返す
     return {
         "current_step_index": 0,
-        "plan": revised_steps,
+        "main_plan": revised_steps,
         "need_plan_revision": False
     }
 
@@ -651,7 +651,7 @@ if __name__ == "__main__":
     if result["status"] == "success":
         # 計画の表示
         print("【計画】")
-        for i, step in enumerate(result["plan"]):
+        for i, step in enumerate(result["main_plan"]):
             print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')} ({step.get('step_type', 'unknown')})")
         print("\n")
         
