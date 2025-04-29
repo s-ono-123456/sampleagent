@@ -43,6 +43,9 @@ PLAN_PROMPT_TEMPLATE = """\
 - 必要な情報を特定するための検索ステップ (step_type: search)
 - 収集した情報を分析するためのステップ (step_type: analyze)
 - 最終的な回答を生成するための統合ステップ (step_type: synthesize)
+
+また、各ステップの中でどのような作業を行うべきかを詳細に説明してください。
+できるだけ簡潔な内容として、複数の項目を含まないようにしてください。
 """
 
 # 検索クエリ生成用プロンプト
@@ -138,7 +141,9 @@ class AgentState(BaseModel):
 class PlanStep(BaseModel):
     step_number: int = Field(description="ステップの番号")
     description: str = Field(description="ステップの説明")
-    action_type: str = Field(description="アクションのタイプ（search, analyze, synthesize）")
+    step_type: str = Field(description="ステップのタイプ（search, analyze, synthesize）")
+    step_action: str = Field(description="ステップの詳細な作業内容")
+
 
 # 実行計画全体を表すモデル
 class Plan(BaseModel):
@@ -191,7 +196,7 @@ def execute_step(state: AgentState) -> AgentState:
     
     # 現在のステップを取得
     current_step = state.plan[state.current_step_index]
-    action_type = current_step.get("action_type", "")
+    step_type = current_step.get("step_type", "")
     step_description = current_step.get("description", "")
     
     # LLMの初期化
@@ -203,7 +208,7 @@ def execute_step(state: AgentState) -> AgentState:
     execution_result = {}
     
     try:
-        if action_type == "search":
+        if step_type == "search":
             # 検索の実行（結果と検索クエリを取得）
             search_result = search_documents(step_description, state.query)
             
@@ -219,12 +224,12 @@ def execute_step(state: AgentState) -> AgentState:
             
             success = execution_result["success"]
             
-        elif action_type == "analyze":
+        elif step_type == "analyze":
             # これまでの情報を分析
             collected_info = "\n\n".join([
                 f"検索結果 {i+1}: {r.get('result', '')}" 
                 for i, r in enumerate(state.execution_results)
-                if r.get("step", {}).get("action_type", "") == "search"
+                if r.get("step", {}).get("step_type", "") == "search"
             ])
             
             if not collected_info:
@@ -250,7 +255,7 @@ def execute_step(state: AgentState) -> AgentState:
                 "success": success
             }
                 
-        elif action_type == "synthesize":
+        elif step_type == "synthesize":
             # 統合ステップは特別な処理をしない
             result = "統合ステップは後で実行されます"
             execution_result = {
@@ -261,7 +266,7 @@ def execute_step(state: AgentState) -> AgentState:
             
         else:
             # 不明なアクションタイプ
-            result = f"不明なアクションタイプ: {action_type}"
+            result = f"不明なアクションタイプ: {step_type}"
             execution_result = {
                 "step": current_step,
                 "result": result,
@@ -375,7 +380,7 @@ def revise_plan(state: AgentState) -> AgentState:
     # 実行結果のフォーマット
     execution_results_text = "\n".join([\
         f"ステップ {r.get('step', {}).get('step_number', i+1)} " +\
-        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"\
+        f"({r.get('step', {}).get('step_type', 'unknown')}): {r.get('result', '')}"\
         for i, r in enumerate(state.execution_results)\
     ])
     
@@ -401,9 +406,9 @@ def revise_plan(state: AgentState) -> AgentState:
         print(f"修正計画の生成中にエラーが発生しました: {str(e)}")
         # フォールバック計画
         revised_steps = [
-            {"step_number": 1, "description": f"「{state.query}」に関する別の情報源を検索", "action_type": "search"},
-            {"step_number": 2, "description": "新しく収集した情報を分析", "action_type": "analyze"},
-            {"step_number": 3, "description": "最終的な回答を生成", "action_type": "synthesize"}
+            {"step_number": 1, "description": f"「{state.query}」に関する別の情報源を検索", "step_type": "search"},
+            {"step_number": 2, "description": "新しく収集した情報を分析", "step_type": "analyze"},
+            {"step_number": 3, "description": "最終的な回答を生成", "step_type": "synthesize"}
         ]
     
     # 状態を更新して返す
@@ -418,14 +423,14 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     """収集した情報の充足度を評価し、再計画の必要性を判断する"""
     llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
-    # 分析ステップ（action_type: analyze）の結果のみを抽出
+    # 分析ステップ（step_type: analyze）の結果のみを抽出
     analyze_results = []
     
     # 現在の計画のanalyzeステップの結果
     current_analyze_results = [
         f"ステップ {r.get('step', {}).get('step_number', i+1)} (洞察): {r.get('result', '')}"
         for i, r in enumerate(state.execution_results)
-        if r.get('step', {}).get('action_type', '') == 'analyze'
+        if r.get('step', {}).get('step_type', '') == 'analyze'
     ]
     
     analyze_results.extend(current_analyze_results)
@@ -436,7 +441,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     previous_analyze_results = [
         f"以前の計画からの洞察 {i+1}: {r.get('result', '')}"
         for i, r in enumerate(previous_results_slice)
-        if r.get('step', {}).get('action_type', '') == 'analyze'
+        if r.get('step', {}).get('step_type', '') == 'analyze'
     ]
     
     if previous_analyze_results:
@@ -503,7 +508,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
         "information_sufficient": information_sufficient,
         "revision_count": revision_count,
         "execution_results": state.execution_results + [{
-            "step": {"step_number": len(state.execution_results) + 1, "description": "情報充足度評価", "action_type": "evaluate"},
+            "step": {"step_number": len(state.execution_results) + 1, "description": "情報充足度評価", "step_type": "evaluate"},
             "result": f"充足度評価: {sufficiency_score}/5 - {'十分' if information_sufficient else '不十分'}\n理由: {reason_message}",
             "success": True,
             "assessment_details": assessment_details
@@ -518,7 +523,7 @@ def generate_answer(state: AgentState) -> AgentState:
     # 実行結果のフォーマット
     all_results = "\n\n".join([
         f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
-        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
+        f"({r.get('step', {}).get('step_type', 'unknown')}): {r.get('result', '')}"
         for i, r in enumerate(state.execution_results)
     ])
     
@@ -647,7 +652,7 @@ if __name__ == "__main__":
         # 計画の表示
         print("【計画】")
         for i, step in enumerate(result["plan"]):
-            print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')} ({step.get('action_type', 'unknown')})")
+            print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')} ({step.get('step_type', 'unknown')})")
         print("\n")
         
         # 最終回答の表示
