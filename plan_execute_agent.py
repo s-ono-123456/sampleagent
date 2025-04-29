@@ -1,281 +1,519 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import os
 import json
-import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, TypedDict
 
-from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import JsonOutputParser
-from pydantic.v1 import BaseModel, Field
-from langchain.chains import LLMChain
+from langchain.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from pydantic import BaseModel, Field
+
+from langgraph.graph import StateGraph, END
 from vector_store_loader import load_vector_stores
 
-class PlanStep(BaseModel):
-    """計画の各ステップを表すPydanticモデル"""
-    step_number: int = Field(description="ステップ番号")
-    description: str = Field(description="ステップの説明")
-    action_type: str = Field(description="アクションタイプ (search, analyze, synthesize)")
+# 環境変数の設定
+os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
+os.environ["LANGSMITH_PROJECT"] = "Plan and Execute agent"
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
+# エージェントの状態を定義するPydanticモデル
+class AgentState(BaseModel):
+    """LangGraphで使用するエージェントの状態"""
+    query: str = Field(description="ユーザーからの質問")
+    plan: List[Dict[str, Any]] = Field(default_factory=list, description="解決のための計画ステップ")
+    current_step_index: int = Field(default=0, description="現在実行中のステップのインデックス")
+    execution_results: List[Dict[str, Any]] = Field(default_factory=list, description="実行結果のリスト")
+    need_plan_revision: bool = Field(default=False, description="計画修正が必要かどうか")
+    information_sufficient: bool = Field(default=True, description="収集した情報が十分かどうか")
+    final_answer: Optional[str] = Field(default=None, description="最終的な回答")
+    next_step: str = Field(default=None, description="次に実行すべきステップ")
+
+# 計画のステップを表すモデル
+class PlanStep(BaseModel):
+    step_number: int = Field(description="ステップの番号")
+    description: str = Field(description="ステップの説明")
+    action_type: str = Field(description="アクションのタイプ（search, analyze, synthesize）")
+
+# 実行計画全体を表すモデル
 class Plan(BaseModel):
-    """計画全体を表すPydanticモデル"""
     steps: List[PlanStep] = Field(description="計画のステップリスト")
 
-class ExecutionResult(BaseModel):
-    """ステップ実行結果を表すPydanticモデル"""
-    step: PlanStep = Field(description="実行されたステップ")
-    result: str = Field(description="実行結果")
-    success: bool = Field(description="実行が成功したかどうか")
+# 検索クエリを表すモデル
+class SearchQuery(BaseModel):
+    query: str = Field(description="検索に使用するクエリ")
 
-class Planner:
-    """
-    ユーザーの質問を分析し、解決のための計画を立てるクラス
-    """
-    def __init__(self, llm: ChatOpenAI):
-        self.llm = llm
-        self.parser = JsonOutputParser()
-        
-        self.plan_prompt_template = PromptTemplate(
-            template="""
-            あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
-            ユーザーからの以下の質問に答えるための調査計画を作成してください。
-            
-            質問: {query}
-            
-            計画は以下のステップに分解してください:
-            1. 必要な情報を特定するための検索ステップ (action_type: search)
-            2. 収集した情報を分析するためのステップ (action_type: analyze)
-            3. 最終的な回答を生成するための統合ステップ (action_type: synthesize)
-            
-            以下の形式でJSON形式の計画を返してください:
-            {{
-              "steps": [
-                {{
-                  "step_number": 1,
-                  "description": "検索するステップの説明",
-                  "action_type": "search"
-                }},
-                {{
-                  "step_number": 2,
-                  "description": "分析するステップの説明",
-                  "action_type": "analyze"
-                }},
-                {{
-                  "step_number": 3,
-                  "description": "統合するステップの説明",
-                  "action_type": "synthesize"
-                }}
-              ]
-            }}
-            """,
-            input_variables=["query"]
-        )
-        
-    def create_plan(self, query: str) -> Plan:
-        """ユーザークエリから計画を生成する"""
-        plan_chain = self.plan_prompt_template | self.llm | self.parser
-        
-        try:
-            # 構造化出力を解析
-            plan_output = plan_chain.invoke({"query": query})
-            steps_data = plan_output.get("steps", [])
-            
-            # Pydanticモデルに変換
-            plan_steps = []
-            for step_data in steps_data:
-                step = PlanStep(
-                    step_number=step_data.get("step_number", 1),
-                    description=step_data.get("description", ""),
-                    action_type=step_data.get("action_type", "search")
-                )
-                plan_steps.append(step)
-            
-            return Plan(steps=plan_steps)
-        except Exception as e:
-            print(f"計画生成中にエラーが発生しました: {str(e)}")
-            # フォールバック計画を作成
-            return self._create_fallback_plan(query)
-            
-    def _create_fallback_plan(self, query: str) -> Plan:
-        """エラー発生時のフォールバック計画を作成"""
-        return Plan(steps=[
-            PlanStep(step_number=1, description=f"「{query}」に関連する情報を検索", action_type="search"),
-            PlanStep(step_number=2, description="収集した情報を分析", action_type="analyze"),
-            PlanStep(step_number=3, description="最終的な回答を生成", action_type="synthesize")
-        ])
+# 複数の検索クエリを表すモデル
+class MultiSearchQuery(BaseModel):
+    queries: List[str] = Field(description="複数の検索クエリリスト")
 
-class Executor:
-    """
-    計画の各ステップを実行するクラス
-    """
-    def __init__(self, llm: ChatOpenAI, vector_store):
-        self.llm = llm
-        self.vector_store = vector_store
-        self.execution_results: List[ExecutionResult] = []
-        
-        # 検索用のプロンプトテンプレート
-        self.search_prompt = PromptTemplate(
-            template="""
-            以下のステップを実行するために適切な検索クエリを作成してください:
-            
-            ステップ: {step_description}
-            
-            元の質問: {query}
-            
-            検索クエリ (キーワードのみで、簡潔に):
-            """,
-            input_variables=["step_description", "query"]
-        )
-        
-        # 分析用のプロンプトテンプレート
-        self.analyze_prompt = PromptTemplate(
-            template="""
-            以下の情報を分析し、ステップに関する洞察を提供してください:
-            
-            ステップ: {step_description}
-            
-            元の質問: {query}
-            
-            これまでに収集した情報:
-            {collected_info}
-            
-            分析結果:
-            """,
-            input_variables=["step_description", "query", "collected_info"]
-        )
-        
-        # 統合用のプロンプトテンプレート
-        self.synthesize_prompt = PromptTemplate(
-            template="""
-            収集したすべての情報に基づいて、ユーザーの質問に対する最終的な回答を作成してください。
-            
-            質問: {query}
-            
-            収集した情報:
-            {all_results}
-            
-            回答は明確で簡潔、かつ情報に富んだものにしてください。
-            設計書の内容に基づいて事実を述べ、根拠となる情報を含めてください。
-            
-            回答:
-            """,
-            input_variables=["query", "all_results"]
-        )
+# 計画作成ノード
+def create_plan(state: AgentState) -> AgentState:
+    """ユーザーの質問から実行計画を作成するノード"""
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
-    def execute_plan(self, plan: Plan, query: str) -> str:
-        """計画を実行し、最終的な回答を返す"""
-        for step in plan.steps:
-            result = self._execute_step(step, query)
-            self.execution_results.append(result)
-            
-            # 実行に失敗した場合、計画を修正する
-            if not result.success:
-                self._revise_plan(plan, query)
-                break
-        
-        # 最終回答の生成
-        return self._generate_final_answer(query)
+    plan_prompt = ChatPromptTemplate.from_template("""
+    あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
+    ユーザーからの以下の質問に答えるための調査計画を作成してください。
     
-    def _execute_step(self, step: PlanStep, query: str) -> ExecutionResult:
-        """ステップの内容に基づいて適切なアクションを実行"""
-        try:
-            if step.action_type == "search":
-                result = self._search_documents(step, query)
-                return ExecutionResult(step=step, result=result, success=bool(result))
+    質問: {query}
+    
+    計画は以下のステップに分解してください:
+    1. 必要な情報を特定するための検索ステップ (action_type: search)
+    2. 収集した情報を分析するためのステップ (action_type: analyze)
+    3. 最終的な回答を生成するための統合ステップ (action_type: synthesize)
+    """)
+    
+    # with_structured_outputを使用してPlan形式での出力を強制
+    structured_llm = llm.with_structured_output(Plan)
+    
+    # チェーンを実行して計画を生成
+    plan_chain = plan_prompt | structured_llm
+    plan_result = plan_chain.invoke({"query": state.query})
+    
+    # Planオブジェクトをリストに変換
+    steps = [step.model_dump() for step in plan_result.steps]
+    
+    # 状態を更新して返す
+    return {
+        "plan": steps
+    }
+
+# タスク実行ノード
+def execute_step(state: AgentState) -> AgentState:
+    """計画の各ステップを実行するノード"""
+    # 全ステップが完了していたら何もしない
+    if state.current_step_index >= len(state.plan):
+        return state
+    
+    # 現在のステップを取得
+    current_step = state.plan[state.current_step_index]
+    action_type = current_step.get("action_type", "")
+    step_description = current_step.get("description", "")
+    
+    # LLMの初期化
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    
+    # アクションタイプに基づいて実行
+    result = ""
+    success = True
+    execution_result = {}
+    
+    try:
+        if action_type == "search":
+            # 検索の実行（結果と検索クエリを取得）
+            search_result = search_documents(step_description, state.query)
             
-            elif step.action_type == "analyze":
-                result = self._analyze_information(step, query)
-                return ExecutionResult(step=step, result=result, success=True)
-            
-            elif step.action_type == "synthesize":
-                # 統合ステップは最後に実行するので、ここでは仮の結果を返す
-                return ExecutionResult(step=step, result="統合ステップは後で実行します", success=True)
-            
+            # 検索結果とクエリがタプルとして返される場合の処理
+            if isinstance(search_result, tuple) and len(search_result) == 2:
+                result, search_queries = search_result
+                # 検索クエリを実行結果に含める
+                execution_result = {
+                    "step": current_step,
+                    "result": result,
+                    "success": bool(result) and "情報が見つかりません" not in result,
+                    "search_queries": search_queries
+                }
             else:
-                # 不明なアクションタイプの場合
-                return ExecutionResult(
-                    step=step,
-                    result=f"不明なアクションタイプ: {step.action_type}",
-                    success=False
-                )
-        
+                # 旧バージョンのサポートのため
+                result = search_result
+                execution_result = {
+                    "step": current_step,
+                    "result": result,
+                    "success": bool(result) and "情報が見つかりません" not in result
+                }
+            
+            success = execution_result["success"]
+            
+        elif action_type == "analyze":
+            # これまでの情報を分析
+            collected_info = "\n\n".join([
+                f"検索結果 {i+1}: {r.get('result', '')}" 
+                for i, r in enumerate(state.execution_results)
+                if r.get("step", {}).get("action_type", "") == "search"
+            ])
+            
+            if not collected_info:
+                result = "分析する情報がありません。検索ステップが失敗したか、実行されていません。"
+                success = False
+            else:
+                analyze_prompt = ChatPromptTemplate.from_template("""
+                以下の情報を分析し、ステップに関する洞察を提供してください:
+                
+                ステップ: {step_description}
+                元の質問: {query}
+                
+                これまでに収集した情報:
+                {collected_info}
+                
+                分析結果:
+                """)
+                
+                analyze_chain = analyze_prompt | llm
+                analyze_result = analyze_chain.invoke({
+                    "step_description": step_description,
+                    "query": state.query,
+                    "collected_info": collected_info
+                })
+                
+                result = analyze_result.content if hasattr(analyze_result, 'content') else str(analyze_result)
+                success = True
+            
+            execution_result = {
+                "step": current_step,
+                "result": result,
+                "success": success
+            }
+                
+        elif action_type == "synthesize":
+            # 統合ステップは特別な処理をしない
+            result = "統合ステップは後で実行されます"
+            execution_result = {
+                "step": current_step,
+                "result": result,
+                "success": True
+            }
+            
+        else:
+            # 不明なアクションタイプ
+            result = f"不明なアクションタイプ: {action_type}"
+            execution_result = {
+                "step": current_step,
+                "result": result,
+                "success": False
+            }
+            success = False
+            
+    except Exception as e:
+        result = f"実行中にエラーが発生しました: {str(e)}"
+        execution_result = {
+            "step": current_step,
+            "result": result,
+            "success": False
+        }
+        success = False
+    
+    # 実行結果を記録
+    execution_results = state.execution_results.copy()
+    execution_results.append(execution_result)
+    
+    # 次のステップへ、または計画修正が必要かどうかを判断
+    need_revision = not success
+    
+    # 状態を更新して返す
+    return {
+        "current_step_index": state.current_step_index + 1,
+        "execution_results": execution_results,
+        "need_plan_revision": need_revision
+    }
+
+# ベクトル検索関数
+def search_documents(step_description: str, query: str) -> str:
+    """ベクトルストアを使用して関連文書を検索"""
+    # LLMの初期化
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    
+    # 複数の検索クエリの生成
+    search_prompt = ChatPromptTemplate.from_template("""
+    以下のステップを実行するために適切な検索クエリを複数作成してください:
+    
+    ステップ: {step_description}
+    元の質問: {query}
+    
+    ベクトルデータベースを検索するための検索クエリを3つ作成してください。
+    各クエリは異なる視点や表現を用いて、情報を広く収集できるようにしてください。
+    """)
+    
+    # with_structured_outputを使用してMultiSearchQuery形式での出力を強制
+    structured_llm = llm.with_structured_output(MultiSearchQuery)
+    
+    # チェーンを実行して検索クエリを生成
+    search_chain = search_prompt | structured_llm
+    search_result = search_chain.invoke({
+        "step_description": step_description, 
+        "query": query
+    })
+    
+    # 構造化された結果から検索クエリを取得
+    search_queries = search_result.queries
+    
+    # ベクトルストアを読み込み
+    try:
+        vector_store = load_vector_stores()
+    except Exception as e:
+        return f"ベクトルストアの読み込みに失敗しました: {str(e)}"
+    
+    # 重複除去のためのセット
+    all_docs_set = set()
+    unique_docs = []
+    
+    # 各クエリで検索を実行し重複を除去
+    for query_text in search_queries:
+        try:
+            # 検索の実行
+            docs = vector_store.similarity_search(query_text, k=3)
+            
+            for doc in docs:
+                # ドキュメントのソースと内容をキーとして使用して重複を検出
+                doc_key = f"{doc.metadata.get('source', 'unknown')}::{doc.page_content[:100]}"
+                
+                if doc_key not in all_docs_set:
+                    all_docs_set.add(doc_key)
+                    unique_docs.append(doc)
         except Exception as e:
-            # 例外が発生した場合
-            return ExecutionResult(
-                step=step,
-                result=f"実行中にエラーが発生しました: {str(e)}",
-                success=False
-            )
+            print(f"クエリ '{query_text}' の検索中にエラーが発生しました: {str(e)}")
+            continue
     
-    def _search_documents(self, step: PlanStep, query: str) -> str:
-        """ベクトルストアを使用して関連文書を検索"""
-        # 検索クエリの生成
-        search_chain = self.search_prompt | self.llm
-        search_query = search_chain.invoke({"step_description": step.description, "query": query})
-        
-        # ベクトルストアで検索
-        docs = self.vector_store.similarity_search(search_query, k=3)
-        
-        if not docs:
-            return "関連する情報が見つかりませんでした。"
-        
-        # 検索結果のフォーマット
-        results = []
-        for doc in docs:
-            source = doc.metadata.get("source", "不明")
-            results.append(f"ドキュメント: {source}\n内容: {doc.page_content}")
-        
-        return "\n\n".join(results)
+    # 関連ドキュメントが見つからなかった場合
+    if not unique_docs:
+        return "関連する情報が見つかりませんでした。"
     
-    def _analyze_information(self, step: PlanStep, query: str) -> str:
-        """収集した情報を分析"""
-        # これまでに収集した情報を取得
-        collected_info = "\n\n".join([
-            f"ステップ {r.step.step_number}: {r.result}" for r in self.execution_results
-            if r.step.action_type == "search"
-        ])
-        
-        if not collected_info:
-            return "分析する情報がありません。まず検索ステップを実行してください。"
-        
-        # 分析の実行
-        analyze_chain = self.analyze_prompt | self.llm
-        analysis = analyze_chain.invoke({
-            "step_description": step.description,
-            "query": query,
-            "collected_info": collected_info
+    # 検索結果のフォーマット
+    results = []
+    for doc in unique_docs:
+        source = doc.metadata.get("source", "不明")
+        results.append(f"ドキュメント: {source}\n内容: {doc.page_content}")
+    
+    # 最終的な結果文字列
+    result_text = "\n\n".join(results)
+    
+    # UI表示用に検索クエリを返す
+    return result_text, search_queries
+
+# 計画評価ノード
+def evaluate_plan(state: AgentState):
+    """計画の状態を評価し、次に実行すべきノードを決定"""
+    if state.need_plan_revision:
+        return {
+            "next_step": "revise_plan"
+        }
+    elif state.current_step_index < len(state.plan):
+        return {
+            "next_step": "execute_step"
+        }
+    else:
+        return {
+            "next_step": "assess_information_sufficiency"
+        }
+
+# 計画修正ノード
+def revise_plan(state: AgentState) -> AgentState:
+    """実行結果に基づいて計画を修正"""
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    
+    # 実行結果のフォーマット
+    execution_results_text = "\n".join([
+        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
+        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
+        for i, r in enumerate(state.execution_results)
+    ])
+    
+    # 計画修正プロンプト
+    revision_prompt = ChatPromptTemplate.from_template("""
+    次の計画を実行中に問題が発生しました。より効果的な計画を提案してください。
+    
+    元の質問: {query}
+    
+    元の計画: 
+    {original_plan}
+    
+    実行結果:
+    {execution_results}
+    
+    修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze/synthesize）を含めてください。
+    """)
+    
+    # with_structured_outputを使用してPlan形式での出力を強制
+    structured_llm = llm.with_structured_output(Plan)
+    
+    try:
+        # チェーンを実行して修正計画を生成
+        revision_chain = revision_prompt | structured_llm
+        revision_result = revision_chain.invoke({
+            "query": state.query,
+            "original_plan": json.dumps(state.plan, ensure_ascii=False),
+            "execution_results": execution_results_text
         })
         
-        return analysis
-    
-    def _revise_plan(self, plan: Plan, query: str) -> None:
-        """計画の修正（現在の実装では単に警告を出すだけ）"""
-        print(f"警告: 計画の実行中に問題が発生しました。ステップ {self.execution_results[-1].step.step_number}")
-    
-    def _generate_final_answer(self, query: str) -> str:
-        """すべての結果を統合して最終回答を生成"""
-        # これまでに収集したすべての結果を取得
-        all_results = "\n\n".join([
-            f"ステップ {r.step.step_number} ({r.step.action_type}): {r.result}" 
-            for r in self.execution_results
-        ])
+        # Planオブジェクトをリストに変換
+        revised_steps = [step.model_dump() for step in revision_result.steps]
         
-        # 最終回答の生成
-        synthesize_chain = self.synthesize_prompt | self.llm
-        final_answer = synthesize_chain.invoke({
-            "query": query, 
-            "all_results": all_results
-        })
-        
-        return final_answer
+    except Exception as e:
+        print(f"修正計画の生成中にエラーが発生しました: {str(e)}")
+        # フォールバック計画
+        revised_steps = [
+            {"step_number": 1, "description": f"「{state.query}」に関する別の情報源を検索", "action_type": "search"},
+            {"step_number": 2, "description": "新しく収集した情報を分析", "action_type": "analyze"},
+            {"step_number": 3, "description": "最終的な回答を生成", "action_type": "synthesize"}
+        ]
+    
+    # 状態を更新して返す
+    return {
+        "current_step_index": 0,
+        "plan": revised_steps,
+        "need_plan_revision": False
+    }
+
+# 情報充足度評価ノード
+def assess_information_sufficiency(state: AgentState) -> AgentState:
+    """収集した情報の充足度を評価し、再計画の必要性を判断する"""
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    
+    # 実行結果のフォーマット
+    all_results = "\n\n".join([
+        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
+        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
+        for i, r in enumerate(state.execution_results)
+    ])
+    
+    # 情報充足度評価プロンプト
+    assessment_prompt = ChatPromptTemplate.from_template("""
+    あなたは質問に回答するために収集された情報の充足度を評価するAIアシスタントです。
+    ユーザーの質問に対して、以下の情報が十分であるかどうかを評価してください。
+
+    質問: {query}
+    
+    収集した情報:
+    {all_results}
+    
+    以下の評価基準に基づいて収集した情報の充足度を評価してください:
+    1. **網羅性**: 質問に関連するすべての重要な側面がカバーされているか
+    2. **一貫性**: 矛盾する情報がないか
+    3. **適切性**: 情報が質問に直接関連しているか
+    4. **詳細度**: 質問に答えるために十分な詳細情報が含まれているか
+    5. **最新性**: 情報が最新かどうか（もし判断できる場合）
+    
+    評価結果を以下の形式で出力してください:
+    - 充足度 (1-5): [1-5の数字、1が最も不十分、5が最も十分]
+    - 不足している情報: [具体的に不足している情報を列挙]
+    - 再調査が必要: [はい/いいえ]
+    - 理由: [再調査が必要な理由や追加すべき視点]
+    """)
+    
+    # 評価の実行
+    assessment_chain = assessment_prompt | llm
+    assessment_result = assessment_chain.invoke({
+        "query": state.query,
+        "all_results": all_results
+    })
+    
+    # 評価結果のテキストを取得
+    assessment_text = assessment_result.content if hasattr(assessment_result, 'content') else str(assessment_result)
+    
+    # 再調査が必要かどうかの判断（簡易的な判断ロジック）
+    need_more_research = "再調査が必要: はい" in assessment_text
+    
+    # 判断結果に基づいて次のステップを設定
+    if need_more_research:
+        next_step = "revise_plan"
+        information_sufficient = False
+    else:
+        next_step = "generate_answer"
+        information_sufficient = True
+    
+    # 状態を更新して返す
+    return {
+        "next_step": next_step,
+        "information_sufficient": information_sufficient
+    }
+
+# 回答生成ノード
+def generate_answer(state: AgentState) -> AgentState:
+    """実行結果から最終回答を生成"""
+    llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
+    
+    # 実行結果のフォーマット
+    all_results = "\n\n".join([
+        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
+        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
+        for i, r in enumerate(state.execution_results)
+    ])
+    
+    # 回答生成プロンプト
+    answer_prompt = ChatPromptTemplate.from_template("""
+    収集したすべての情報に基づいて、ユーザーの質問に対する最終的な回答を作成してください。
+    
+    質問: {query}
+    
+    収集した情報:
+    {all_results}
+    
+    回答は明確で簡潔、かつ情報に富んだものにしてください。
+    設計書の内容に基づいて事実を述べ、根拠となる情報を含めてください。
+    
+    回答:
+    """)
+    
+    # 回答の生成
+    answer_chain = answer_prompt | llm
+    answer_result = answer_chain.invoke({
+        "query": state.query,
+        "all_results": all_results
+    })
+    
+    # 回答テキストを抽出
+    final_answer = answer_result.content if hasattr(answer_result, 'content') else str(answer_result)
+    
+    # 状態を更新して返す
+    return {
+        "final_answer": final_answer
+    }
+
+# グラフの構築
+def build_agent_graph():
+    """LangGraphを使用したエージェントのグラフを構築"""
+    # 状態グラフの作成
+    workflow = StateGraph(AgentState)
+    
+    # ノードの追加
+    workflow.add_node("create_plan", create_plan)
+    workflow.add_node("execute_step", execute_step)
+    workflow.add_node("evaluate_plan", evaluate_plan)
+    workflow.add_node("revise_plan", revise_plan)
+    workflow.add_node("assess_information_sufficiency", assess_information_sufficiency)
+    workflow.add_node("generate_answer", generate_answer)
+    
+    # エッジの追加（ノード間の接続）
+    workflow.add_edge("create_plan", "execute_step")
+
+    def _check_condition(state: AgentState) -> str:
+        return_value = state.next_step
+        return return_value
+
+    workflow.add_conditional_edges(
+        "evaluate_plan", _check_condition,
+        path_map = {
+            "revise_plan": "revise_plan",
+            "execute_step": "execute_step",
+            "assess_information_sufficiency": "assess_information_sufficiency"
+        }
+    )
+    
+    # 情報充足度評価ノードからの条件分岐
+    workflow.add_conditional_edges(
+        "assess_information_sufficiency", _check_condition,
+        path_map = {
+            "revise_plan": "revise_plan",
+            "generate_answer": "generate_answer"
+        }
+    )
+    
+    workflow.add_edge("revise_plan", "execute_step")
+    workflow.add_edge("execute_step", "evaluate_plan")
+    workflow.add_edge("generate_answer", END)
+    
+    # 開始ノードの設定
+    workflow.set_entry_point("create_plan")
+    
+    # コンパイルしてグラフを返す
+    return workflow.compile()
 
 class PlanExecuteAgent:
     """
-    Plan and Execute型のAIエージェント
+    LangGraphを使用したPlan and Execute型のAIエージェント
     """
-    def __init__(self, model_name: str = "gpt-3.5-turbo", temperature: float = 0.0):
+    def __init__(self, model_name: str = "gpt-4.1-nano", temperature: float = 0.0):
         """
         AIエージェントの初期化
         
@@ -283,15 +521,11 @@ class PlanExecuteAgent:
             model_name: 使用するOpenAIモデル名
             temperature: 生成時の温度パラメータ
         """
-        # LLMの初期化
-        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature)
+        self.model_name = model_name
+        self.temperature = temperature
         
-        # ベクトルストアの読み込み
-        self.vector_store = load_vector_stores()
-        
-        # プランナーとエグゼキュータの初期化
-        self.planner = Planner(self.llm)
-        self.executor = Executor(self.llm, self.vector_store)
+        # グラフの構築
+        self.agent_graph = build_agent_graph()
     
     def run(self, query: str) -> Dict[str, Any]:
         """
@@ -303,34 +537,25 @@ class PlanExecuteAgent:
         Returns:
             結果を含む辞書
         """
-        try:
-            # 計画の作成
-            plan = self.planner.create_plan(query)
+        # 初期状態の作成
+        initial_state = AgentState(query=query)
+        
+        # グラフの実行
+        result = self.agent_graph.invoke(initial_state)
+        
+        # 結果の作成
+        return {
+            "status": "success",
+            "query": query,
+            "plan": result['plan'],
+            "execution_results": result['execution_results'],
+            "answer": result['final_answer']
+        }
             
-            # 計画の実行
-            answer = self.executor.execute_plan(plan, query)
-            
-            # 結果の作成
-            return {
-                "status": "success",
-                "query": query,
-                "plan": plan,
-                "execution_results": self.executor.execution_results,
-                "answer": answer
-            }
-            
-        except Exception as e:
-            return {
-                "status": "error",
-                "query": query,
-                "error": str(e)
-            }
+
 
 # サンプル実行用コード
 if __name__ == "__main__":
-    import os
-    # OpenAI APIキーの設定
-    # os.environ["OPENAI_API_KEY"] = "あなたのOpenAI APIキー"
     
     # エージェントの初期化
     agent = PlanExecuteAgent()
@@ -343,8 +568,8 @@ if __name__ == "__main__":
     if result["status"] == "success":
         # 計画の表示
         print("【計画】")
-        for step in result["plan"].steps:
-            print(f"ステップ {step.step_number}: {step.description} ({step.action_type})")
+        for i, step in enumerate(result["plan"]):
+            print(f"ステップ {step.get('step_number', i+1)}: {step.get('description', '')} ({step.get('action_type', 'unknown')})")
         print("\n")
         
         # 最終回答の表示
