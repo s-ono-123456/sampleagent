@@ -531,6 +531,8 @@ class PlanExecuteAgent:
         
         # グラフの構築
         self.agent_graph = build_agent_graph()
+        mermaid_code = self.agent_graph.get_graph().draw_mermaid()
+        # print(f"エージェントのグラフ:\n{mermaid_code}")
     
     def run(self, query: str) -> Dict[str, Any]:
         """
