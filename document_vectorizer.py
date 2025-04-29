@@ -75,7 +75,7 @@ def create_faiss_index(split_documents: List[Dict], folder_name: str):
     db = FAISS.from_texts(texts=texts, embedding=embeddings, metadatas=metadatas)
     
     # FAISSインデックスを保存
-    index_path = f"faiss_index_{folder_name}"
+    index_path = f"index/faiss_index_{folder_name}"
     db.save_local(index_path)
     print(f"FAISSインデックスを保存しました: {index_path}")
     

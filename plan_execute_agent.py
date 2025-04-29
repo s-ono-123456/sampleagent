@@ -10,7 +10,7 @@ from langchain_community.vectorstores import FAISS
 from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, END, START
-from vector_store_loader import load_vector_stores
+from vector_store_loader import load_vector_stores, load_vector_stores_category
 
 
 # 環境変数の設定
@@ -77,8 +77,13 @@ SEARCH_PROMPT_TEMPLATE = """\
 ステップ: {step_description}
 元の質問: {query}
 
-ベクトルデータベースを検索するための検索クエリを3つ作成してください。
-各クエリは異なる視点や表現を用いて、情報を広く収集できるようにしてください。
+ベクトルデータベースを検索するために、どのカテゴリからどのような検索クエリで検索すればよいかを考え、
+3つ以上の組み合わせを作成してください。
+各クエリの組み合わせは異なる視点や表現を用いて、情報を広く収集できるようにしてください。
+
+なお、検索が可能なカテゴリ(category)は以下の通りです。
+- バッチ設計に関する設計書 (category:batch_design)
+- 画面設計に関する設計書 (category:screen_design)
 """
 
 # 分析用プロンプト
@@ -121,7 +126,7 @@ REVISION_PROMPT_TEMPLATE = """\
 {original_plan}
 
 実行結果:
-{execution_results}
+{all_insights}
 
 修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze）を含めてください。
 """
@@ -145,7 +150,7 @@ ASSESSMENT_PROMPT_TEMPLATE = """
 
 充足度スコアは1〜5の整数で評価してください（1が最も不十分、5が最も十分）。
 不足している情報がある場合は具体的に列挙してください。
-再調査が必要かどうかを判断し（スコアが4未満の場合は必要）、その理由を説明してください。
+再調査が必要かどうかを判断し（スコアが1～3の場合は必要）、その理由を説明してください。
 """
 
 # 回答生成用プロンプト
@@ -179,9 +184,11 @@ class AgentState(BaseModel):
     need_plan_revision: bool = Field(default=False, description="計画修正が必要かどうか")
     information_sufficient: bool = Field(default=True, description="収集した情報が十分かどうか")
     final_answer: Optional[str] = Field(default=None, description="最終的な回答")
-    next_step: str = Field(default=None, description="次に実行すべきステップ")
+    next_step: str = Field(default="", description="次に実行すべきステップ")
+    last_substep: str = Field(default="", description="最後に実行したサブステップ")
     revision_count: int = Field(default=0, description="計画修正の回数")
     conclusion_results: List[Dict[str, Any]] = Field(default_factory=list, description="ステップの結果リスト")
+    last_plan_description: str = Field(default="", description="最後に計画したステップの計画")
 
 # 計画のステップを表すモデル
 class MainPlanStep(BaseModel):
@@ -207,10 +214,11 @@ class SubPlan(BaseModel):
 # 検索クエリを表すモデル
 class SearchQuery(BaseModel):
     query: str = Field(description="検索に使用するクエリ")
+    category: str = Field(description="検索に使用するカテゴリ")
 
 # 複数の検索クエリを表すモデル
 class MultiSearchQuery(BaseModel):
-    queries: List[str] = Field(description="複数の検索クエリリスト")
+    queries: List[SearchQuery] = Field(description="複数の検索クエリリスト")
 
 # 情報充足度評価の結果を表すモデル
 class InformationSufficiencyAssessment(BaseModel):
@@ -257,7 +265,9 @@ def create_subplan(state: AgentState) -> AgentState:
     # 状態を更新して返す
     return {
         "sub_plan": steps,
-        "current_substep_index": 0
+        "current_substep_index": 0,
+        "last_substep": "plan",
+        "last_plan_description": step_description
     }
 
 # ベクトル検索関数
@@ -282,21 +292,21 @@ def search_documents(step_description: str, query: str) -> str:
     # 構造化された結果から検索クエリを取得
     search_queries = search_result.queries
     
-    # ベクトルストアを読み込み
-    try:
-        vector_store = load_vector_stores()
-    except Exception as e:
-        return f"ベクトルストアの読み込みに失敗しました: {str(e)}"
     
     # 重複除去のためのセット
     all_docs_set = set()
     unique_docs = []
     
     # 各クエリで検索を実行し重複を除去
-    for query_text in search_queries:
+    for search_query in search_queries:
         try:
+            # ベクトルストアを読み込み
+            try:
+                vector_store = load_vector_stores_category(search_query.category)
+            except Exception as e:
+                return f"ベクトルストアの読み込みに失敗しました: {str(e)}"
             # 検索の実行
-            docs = vector_store.similarity_search(query_text, k=3)
+            docs = vector_store.similarity_search(search_query.query, k=3)
             
             for doc in docs:
                 # ドキュメントのソースと内容をキーとして使用して重複を検出
@@ -306,7 +316,7 @@ def search_documents(step_description: str, query: str) -> str:
                     all_docs_set.add(doc_key)
                     unique_docs.append(doc)
         except Exception as e:
-            print(f"クエリ '{query_text}' の検索中にエラーが発生しました: {str(e)}")
+            print(f"クエリ '{search_query.query}' の検索中にエラーが発生しました: {str(e)}")
             continue
     
     # 関連ドキュメントが見つからなかった場合
@@ -362,7 +372,8 @@ def execute_search_step(state: AgentState) -> AgentState:
     return {
         "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
-        "need_plan_revision": not execution_result["success"]
+        "need_plan_revision": not execution_result["success"],
+        "last_substep": "search"
     }
 
 def execute_analyze_step(state: AgentState) -> AgentState:
@@ -421,7 +432,8 @@ def execute_analyze_step(state: AgentState) -> AgentState:
     return {
         "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
-        "need_plan_revision": not execution_result["success"]
+        "need_plan_revision": not execution_result["success"],
+        "last_substep": "analyze"
     }
 
 def execute_synthesize_step(state: AgentState) -> AgentState:
@@ -482,7 +494,8 @@ def execute_synthesize_step(state: AgentState) -> AgentState:
         "current_step_index": state.current_step_index + 1,
         "execution_results": [],
         "need_plan_revision": not step_conclusion_result["success"],
-        "conclusion_results": conclusion_results
+        "conclusion_results": conclusion_results,
+        "last_substep": "synthesize"
     }
 
 def execute_unknown_step(state: AgentState) -> AgentState:
@@ -506,7 +519,8 @@ def execute_unknown_step(state: AgentState) -> AgentState:
     return {
         "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
-        "need_plan_revision": True
+        "need_plan_revision": True,
+        "last_substep": "unknown"
     }
 
 # 実行するサブステップタイプを判断する関数
@@ -585,7 +599,8 @@ def create_plan(state: AgentState) -> AgentState:
     
     # 状態を更新して返す
     return {
-        "main_plan": steps
+        "main_plan": steps,
+        "last_substep": "plan"
     }
 # タスク実行ノード (メインの実行ノード、サブグラフを呼び出す)
 def execute_step(state: AgentState) -> AgentState:
@@ -616,12 +631,21 @@ def revise_plan(state: AgentState) -> AgentState:
     """実行結果に基づいて計画を修正"""
     llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
-    # 実行結果のフォーマット
-    execution_results_text = "\n".join([\
-        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +\
-        f"({r.get('step', {}).get('step_type', 'unknown')}): {r.get('result', '')}"\
-        for i, r in enumerate(state.execution_results)\
-    ])
+    # 分析ステップ（step_type: synthesis）の結果のみを抽出
+    conclusion_results = []
+
+    # 現在の計画のanalyzeステップの結果
+    for i, result in enumerate(state.conclusion_results):
+        conclusion_results.append(
+            f"ステップ {result.get('step', {}).get('step_number', i+1)} (洞察): {result.get('conclusion_results', '')}"
+        )
+    
+    # 分析結果がない場合は適切なメッセージを設定
+    if not conclusion_results:
+        conclusion_results = ["洞察が得られていません。検索結果からの分析が実行されていないか失敗しました。"]
+    
+    # 洞察結果のフォーマット
+    all_insights = "\n\n".join(conclusion_results)
     
     # 計画修正プロンプト
     revision_prompt = ChatPromptTemplate.from_template(REVISION_PROMPT_TEMPLATE)
@@ -635,7 +659,7 @@ def revise_plan(state: AgentState) -> AgentState:
         revision_result = revision_chain.invoke({
             "query": state.query,
             "original_plan": json.dumps(state.main_plan, ensure_ascii=False),
-            "execution_results": execution_results_text
+            "all_insights": all_insights
         })
         
         # Planオブジェクトをリストに変換
@@ -655,7 +679,8 @@ def revise_plan(state: AgentState) -> AgentState:
         "current_step_index": 0,
         "current_substep_index": 0,
         "main_plan": revised_steps,
-        "need_plan_revision": False
+        "need_plan_revision": False,
+        "last_substep": "revise"
     }
 
 # 情報充足度評価ノード
@@ -737,7 +762,8 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
             "result": f"充足度評価: {sufficiency_score}/5 - {'十分' if information_sufficient else '不十分'}\n理由: {reason_message}",
             "success": True,
             "assessment_details": assessment_details
-        }]
+        }],
+        "last_substep": "assessment"
     }
 
 # 回答生成ノード
@@ -765,7 +791,8 @@ def generate_answer(state: AgentState) -> AgentState:
     
     # 状態を更新して返す
     return {
-        "final_answer": answer_result
+        "final_answer": answer_result,
+        "last_substep": "generate_answer",
     }
 
 # グラフの構築
@@ -831,7 +858,7 @@ class PlanExecuteAgent:
         # グラフの構築
         self.agent_graph = build_agent_graph()
         mermaid_code = self.agent_graph.get_graph().draw_mermaid()
-        print(f"エージェントのグラフ:\n{mermaid_code}")
+        # print(f"エージェントのグラフ:\n{mermaid_code}")
     
     def run(self, query: str) -> Dict[str, Any]:
         """
@@ -847,7 +874,7 @@ class PlanExecuteAgent:
         initial_state = AgentState(query=query)
         
         # グラフの実行
-        result = self.agent_graph.invoke(initial_state, {"recursion_limit": 25})
+        result = self.agent_graph.invoke(initial_state, stream_mode="values", subgraphs=True)
         
         # 結果の作成
         return {

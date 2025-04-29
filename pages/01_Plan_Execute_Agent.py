@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-from plan_execute_agent import PlanExecuteAgent
+from plan_execute_agent import PlanExecuteAgent, AgentState, build_agent_graph
 from typing import Dict, Any, List
 
 # ページタイトルと説明
@@ -56,9 +56,6 @@ with st.sidebar:
         help="0に近いほど決定的な回答、1に近いほど創造的な回答になります"
     )
     
-    # デバッグモード
-    debug_mode = st.checkbox("デバッグモード", value=False, help="チェックすると計画と実行の詳細ステップが表示されます")
-
 # タブの作成
 tab1, tab2 = st.tabs(["チャット", "実行計画"])
 
@@ -81,6 +78,11 @@ with tab1:
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             message_placeholder.markdown("計画を立案・実行中です...")
+
+            processing_results = {
+                    "user_query": user_input,
+                    "final_response": None,
+                }
             
             try:
                 # エージェントの初期化とモデル設定
@@ -89,56 +91,66 @@ with tab1:
                 agent.temperature = temperature
                 
                 # エージェントの実行
-                with st.status("処理中...", expanded=True) as status:
+                with st.status("処理中...", expanded=False) as status:
                     status.update(label="計画を立案中...", state="running")
-                    result = agent.run(user_input)
+                    # 初期状態の作成
+                    initial_state = AgentState(query=user_input, last_substep="", last_plan_description="")
+                    agent_graph = build_agent_graph()
+                    endflg = False
                     
-                    if result["status"] == "success":
-                        # 計画と実行結果の保存
-                        st.session_state.plan_execute_steps = result["plan"]
-                        st.session_state.plan_execute_results = result["execution_results"]
+                    # ステータス表示用のプレースホルダを作成
+                    status_placeholder = st.empty()
+                    status_messages = []
+                    
+                    # グラフの実行
+                    for chunk in agent_graph.stream(initial_state, stream_mode="values", subgraphs=True):
                         
-                        # 計画の表示
-                        status.update(label="計画を実行中...", state="running")
+                        node_name = chunk[1]['last_substep']
+                        last_plan_description = chunk[1]['last_plan_description']
                         
-                        # 各実行ステップを表示
-                        for i, exec_result in enumerate(result["execution_results"]):
-                            step = exec_result["step"]
-                            status.update(label=f"ステップ {step['step_number']} 実行中: {step['description']}", state="running")
+                        # ステータスメッセージを追加
+                        if node_name == "search":
+                            status.update(label="必要な情報を収集中...", state="running")
+                            status_messages.append("> 必要な情報を収集中...")
+                        elif node_name == "analyze":
+                            status.update(label="情報の分析中...", state="running")
+                            status_messages.append("> 情報の分析中...")
+                        elif node_name == "synthesize":
+                            status.update(label="情報の整理中...", state="running")
+                            status_messages.append("> 情報の整理中...")
+                        elif node_name == "unknown":
+                            status.update(label="エラーを検知しました。", state="running")
+                            status_messages.append("> エラーを検知しました。")
+                        elif node_name == "plan":
+                            status.update(label="計画を立案中...", state="running")
+                            if last_plan_description != "":
+                                status_messages.append("> 計画を立案完了")
+                                status_messages.append(f"> 計画: {last_plan_description}")
+                        elif node_name == "revise":
+                            status.update(label="再計画中...", state="running")
+                            status_messages.append("> 再計画中...")
+                        elif node_name == "assessment":
+                            status.update(label="収集した情報の評価中...", state="running")
+                            status_messages.append("> 収集した情報を評価中...")
+                        elif node_name == "generate_answer":
+                            status.update(label="最終回答の生成中...", state="running")
+                            status_messages.append("> 最終回答の生成中...")
+                            endflg = True
+                        elif node_name == "":
+                            status.update(label="呼び出し中...", state="running")
                         
-                        status.update(label="処理完了", state="complete")
+                        # HTMLを使って行間を制御し、蓄積されたメッセージを表示
+                        html_content = "<div style='line-height: 1.2; margin-bottom: 0.5rem;'>"
+                        html_content += "<br>".join(status_messages)
+                        html_content += "</div>"
+                        status_placeholder.markdown(html_content, unsafe_allow_html=True)
                         
-                        # 最終回答を表示
-                        message_placeholder.markdown(result["answer"])
+                        if endflg and chunk[1]['final_answer'] is not None:
+                            processing_results["final_response"] = chunk[1]['final_answer']
+                            status.update(label="処理完了", state="complete")
                         
-                        # デバッグモードの場合、実行ステップの詳細を表示
-                        if debug_mode:
-                            st.subheader("処理詳細")
-                            st.write("【実行された計画】")
-                            for step in result["plan"]:
-                                st.write(f"ステップ {step['step_number']}: {step['description']} ({step['action_type']})")
-                            
-                            # ステップごとの実行結果
-                            for i, exec_result in enumerate(result["execution_results"]):
-                                step = exec_result["step"]
-                                st.markdown(f"**ステップ {step['step_number']}: {step['description']} ({step['action_type']})**")
-                                
-                                # 検索ステップの場合、生成された検索クエリを表示
-                                if step['action_type'] == 'search' and 'search_queries' in exec_result:
-                                    st.markdown("**生成された検索クエリ:**")
-                                    for q_idx, query in enumerate(exec_result['search_queries']):
-                                        st.markdown(f"- クエリ {q_idx+1}: `{query}`")
-                                    
-                                st.markdown("**実行結果:**")
-                                st.markdown(exec_result['result'])
-                                st.divider()
-                        
-                        # チャット履歴に回答を追加
-                        st.session_state.plan_execute_messages.append({"role": "assistant", "content": result["answer"]})
-                    else:
-                        error_message = f"エラーが発生しました: {result['error']}"
-                        message_placeholder.markdown(error_message)
-                        st.error(error_message)
+                    message_placeholder.markdown(processing_results["final_response"])
+                    
             
             except Exception as e:
                 error_message = f"エラーが発生しました: {str(e)}"
