@@ -39,6 +39,54 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 MODEL_NAME = "gpt-4.1-nano"
 embedding_model_name = "pkshatech/GLuCoSE-base-ja-v2"
 
+# プロンプトテンプレートの定義
+# 計画作成用プロンプト
+PLANNING_PROMPT_TEMPLATE = '''\
+以下の質問に回答する計画を考えてください。複数のステップに分けて考えてください。
+また、各ステップでは、関連する文書を検索することが出来、基本的にその文書を用いて回答を考えます。
+
+各ステップで、関連する文書を利用して何を考えれば良いかまで考えてください。
+
+質問: {question}
+'''
+
+# 検索クエリ生成用プロンプト
+RETRIEVER_PROMPT_TEMPLATE = '''\
+以下の計画を遂行するために、関連する文書を検索するクエリを3つ考えてください。
+
+計画: {plan}
+'''
+
+# 文脈を用いた回答生成プロンプト
+CONTEXT_PROMPT_TEMPLATE = '''\
+以下はユーザからの質問に対して回答するための一ステップです。
+以下の計画を遂行するために関連文書を検索しました。
+関連文書を考慮して計画を遂行してください。
+なお、関連文書に記載がない場合は回答ができない、と答えてください。
+
+質問: {question}
+
+計画: {plan}
+
+関連文書: """
+{context}
+"""
+'''
+
+# 最終回答生成用プロンプト
+RESPONSE_PROMPT_TEMPLATE = '''\
+以下はユーザからの質問に対して回答するため、事前に計画を立てて、ステップごとに分けて考えた結果です。
+各ステップで考えた結果を考慮して、ユーザの質問に対する最終的な回答を考えてください。
+
+質問: {question}
+
+計画: {plans}
+
+結果："""
+{context}
+"""
+'''
+
 # モデルの設定
 model = ChatOpenAI(model=MODEL_NAME, temperature=0)
 
@@ -54,14 +102,8 @@ db = load_vector_stores(embedding_model_name)
 
 retriever = db.as_retriever()
 
-planning_prompt = ChatPromptTemplate.from_template('''\
-以下の質問に回答する計画を考えてください。複数のステップに分けて考えてください。
-また、各ステップでは、関連する文書を検索することが出来、基本的にその文書を用いて回答を考えます。
-
-各ステップで、関連する文書を利用して何を考えれば良いかまで考えてください。
-
-質問: {question}
-''')
+# チャットプロンプトテンプレートの作成
+planning_prompt = ChatPromptTemplate.from_template(PLANNING_PROMPT_TEMPLATE)
 
 class PlanningOutput(BaseModel):
      plans: list[str] = Field(..., description="計画のリスト")
@@ -83,26 +125,9 @@ plan_output = plan_generation_chain.invoke(
 # プランニングの結果を表示
 # print("Plan Output:", plan_output)
 
-retriever_prompt = ChatPromptTemplate.from_template('''\
-以下の計画を遂行するために、関連する文書を検索するクエリを3つ考えてください。
+retriever_prompt = ChatPromptTemplate.from_template(RETRIEVER_PROMPT_TEMPLATE)
 
-計画: {plan}
-''')
-
-prompt = ChatPromptTemplate.from_template('''\
-以下はユーザからの質問に対して回答するための一ステップです。
-以下の計画を遂行するために関連文書を検索しました。
-関連文書を考慮して計画を遂行してください。
-なお、関連文書に記載がない場合は回答ができない、と答えてください。
-
-質問: {question}
-
-計画: {plan}
-
-関連文書: """
-{context}
-"""
-''')
+prompt = ChatPromptTemplate.from_template(CONTEXT_PROMPT_TEMPLATE)
 
 class RetrieverOutput(BaseModel):
      querys: list[str] = Field(..., description="クエリのリスト")
@@ -131,18 +156,7 @@ for plan in plan_output:
     retriever_outputs.append(retriever_output)
 
 
-responce_prompt = ChatPromptTemplate.from_template('''\
-以下はユーザからの質問に対して回答するため、事前に計画を立てて、ステップごとに分けて考えた結果です。
-各ステップで考えた結果を考慮して、ユーザの質問に対する最終的な回答を考えてください。
-
-質問: {question}
-
-計画: {plans}
-
-結果："""
-{context}
-"""
-''')
+responce_prompt = ChatPromptTemplate.from_template(RESPONSE_PROMPT_TEMPLATE)
 
 responce_rag_chain = {
     "question": RunnablePassthrough(),

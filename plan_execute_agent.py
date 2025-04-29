@@ -20,6 +20,96 @@ os.environ["LANGSMITH_PROJECT"] = "Plan and Execute agent"
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
+# プロンプトテンプレートの定義
+# 計画作成用プロンプト
+PLAN_PROMPT_TEMPLATE = """\
+あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
+ユーザーからの以下の質問に答えるための調査計画を作成してください。
+
+質問: {query}
+
+計画は以下のステップに分解してください:
+1. 必要な情報を特定するための検索ステップ (action_type: search)
+2. 収集した情報を分析するためのステップ (action_type: analyze)
+3. 最終的な回答を生成するための統合ステップ (action_type: synthesize)
+"""
+
+# 検索クエリ生成用プロンプト
+SEARCH_PROMPT_TEMPLATE = """\
+以下のステップを実行するために適切な検索クエリを複数作成してください:
+
+ステップ: {step_description}
+元の質問: {query}
+
+ベクトルデータベースを検索するための検索クエリを3つ作成してください。
+各クエリは異なる視点や表現を用いて、情報を広く収集できるようにしてください。
+"""
+
+# 分析用プロンプト
+ANALYZE_PROMPT_TEMPLATE = """\
+以下の情報を分析し、ステップに関する洞察を提供してください:
+
+ステップ: {step_description}
+元の質問: {query}
+
+これまでに収集した情報:
+{collected_info}
+
+分析結果:
+"""
+
+# 計画修正用プロンプト
+REVISION_PROMPT_TEMPLATE = """\
+次の計画を実行中に問題が発生しました。より効果的な計画を提案してください。
+
+元の質問: {query}
+
+元の計画: 
+{original_plan}
+
+実行結果:
+{execution_results}
+
+修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze/synthesize）を含めてください。
+"""
+
+# 情報充足度評価用プロンプト
+ASSESSMENT_PROMPT_TEMPLATE = """
+あなたは質問に回答するために得られた洞察の充足度を評価するAIアシスタントです。
+ユーザーの質問に対して、以下の洞察が十分であるかどうかを評価してください。
+
+質問: {query}
+
+得られた洞察:
+{all_insights}
+
+以下の評価基準に基づいて得られた洞察の充足度を評価してください:
+1. **網羅性**: 質問に関連するすべての重要な側面がカバーされているか
+2. **一貫性**: 矛盾する情報がないか
+3. **適切性**: 洞察が質問に直接関連しているか
+4. **詳細度**: 質問に答えるために十分な詳細情報が含まれているか
+5. **最新性**: 情報が最新かどうか（もし判断できる場合）
+
+充足度スコアは1〜5の整数で評価してください（1が最も不十分、5が最も十分）。
+不足している情報がある場合は具体的に列挙してください。
+再調査が必要かどうかを判断し（スコアが4未満の場合は必要）、その理由を説明してください。
+"""
+
+# 回答生成用プロンプト
+ANSWER_PROMPT_TEMPLATE = """
+収集したすべての情報に基づいて、ユーザーの質問に対する最終的な回答を作成してください。
+
+質問: {query}
+
+収集した情報:
+{all_results}
+
+回答は明確で簡潔、かつ情報に富んだものにしてください。
+設計書の内容に基づいて事実を述べ、根拠となる情報を含めてください。
+
+回答:
+"""
+
 # エージェントの状態を定義するPydanticモデル
 class AgentState(BaseModel):
     """LangGraphで使用するエージェントの状態"""
@@ -62,17 +152,8 @@ def create_plan(state: AgentState) -> AgentState:
     """ユーザーの質問から実行計画を作成するノード"""
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
-    plan_prompt = ChatPromptTemplate.from_template("""\
-    あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
-    ユーザーからの以下の質問に答えるための調査計画を作成してください。
-    
-    質問: {query}
-    
-    計画は以下のステップに分解してください:
-    1. 必要な情報を特定するための検索ステップ (action_type: search)
-    2. 収集した情報を分析するためのステップ (action_type: analyze)
-    3. 最終的な回答を生成するための統合ステップ (action_type: synthesize)
-    """)
+    # プロンプトテンプレートを使用
+    plan_prompt = ChatPromptTemplate.from_template(PLAN_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してPlan形式での出力を強制
     structured_llm = llm.with_structured_output(Plan)
@@ -138,17 +219,8 @@ def execute_step(state: AgentState) -> AgentState:
                 result = "分析する情報がありません。検索ステップが失敗したか、実行されていません。"
                 success = False
             else:
-                analyze_prompt = ChatPromptTemplate.from_template("""\
-                以下の情報を分析し、ステップに関する洞察を提供してください:
-                
-                ステップ: {step_description}
-                元の質問: {query}
-                
-                これまでに収集した情報:
-                {collected_info}
-                
-                分析結果:
-                """)
+                # プロンプトテンプレートを使用
+                analyze_prompt = ChatPromptTemplate.from_template(ANALYZE_PROMPT_TEMPLATE)
                 
                 analyze_chain = analyze_prompt | llm
                 analyze_result = analyze_chain.invoke({
@@ -214,16 +286,8 @@ def search_documents(step_description: str, query: str) -> str:
     # LLMの初期化
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
-    # 複数の検索クエリの生成
-    search_prompt = ChatPromptTemplate.from_template("""\
-    以下のステップを実行するために適切な検索クエリを複数作成してください:
-    
-    ステップ: {step_description}
-    元の質問: {query}
-    
-    ベクトルデータベースを検索するための検索クエリを3つ作成してください。
-    各クエリは異なる視点や表現を用いて、情報を広く収集できるようにしてください。
-    """)
+    # プロンプトテンプレートを使用
+    search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してMultiSearchQuery形式での出力を強制
     structured_llm = llm.with_structured_output(MultiSearchQuery)
@@ -304,19 +368,7 @@ def revise_plan(state: AgentState) -> AgentState:
     ])
     
     # 計画修正プロンプト
-    revision_prompt = ChatPromptTemplate.from_template("""\
-    次の計画を実行中に問題が発生しました。より効果的な計画を提案してください。
-    
-    元の質問: {query}
-    
-    元の計画: 
-    {original_plan}
-    
-    実行結果:
-    {execution_results}
-    
-    修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze/synthesize）を含めてください。
-    """)
+    revision_prompt = ChatPromptTemplate.from_template(REVISION_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してPlan形式での出力を強制
     structured_llm = llm.with_structured_output(Plan)
@@ -386,26 +438,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     all_insights = "\n\n".join(analyze_results)
     
     # 情報充足度評価プロンプト
-    assessment_prompt = ChatPromptTemplate.from_template("""
-    あなたは質問に回答するために得られた洞察の充足度を評価するAIアシスタントです。
-    ユーザーの質問に対して、以下の洞察が十分であるかどうかを評価してください。
-
-    質問: {query}
-    
-    得られた洞察:
-    {all_insights}
-    
-    以下の評価基準に基づいて得られた洞察の充足度を評価してください:
-    1. **網羅性**: 質問に関連するすべての重要な側面がカバーされているか
-    2. **一貫性**: 矛盾する情報がないか
-    3. **適切性**: 洞察が質問に直接関連しているか
-    4. **詳細度**: 質問に答えるために十分な詳細情報が含まれているか
-    5. **最新性**: 情報が最新かどうか（もし判断できる場合）
-    
-    充足度スコアは1〜5の整数で評価してください（1が最も不十分、5が最も十分）。
-    不足している情報がある場合は具体的に列挙してください。
-    再調査が必要かどうかを判断し（スコアが4未満の場合は必要）、その理由を説明してください。
-    """)
+    assessment_prompt = ChatPromptTemplate.from_template(ASSESSMENT_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してInformationSufficiencyAssessment形式での出力を強制
     structured_llm = llm.with_structured_output(InformationSufficiencyAssessment)
@@ -464,19 +497,7 @@ def generate_answer(state: AgentState) -> AgentState:
     ])
     
     # 回答生成プロンプト
-    answer_prompt = ChatPromptTemplate.from_template("""
-    収集したすべての情報に基づいて、ユーザーの質問に対する最終的な回答を作成してください。
-    
-    質問: {query}
-    
-    収集した情報:
-    {all_results}
-    
-    回答は明確で簡潔、かつ情報に富んだものにしてください。
-    設計書の内容に基づいて事実を述べ、根拠となる情報を含めてください。
-    
-    回答:
-    """)
+    answer_prompt = ChatPromptTemplate.from_template(ANSWER_PROMPT_TEMPLATE)
     
     # 回答の生成
     answer_chain = answer_prompt | llm
