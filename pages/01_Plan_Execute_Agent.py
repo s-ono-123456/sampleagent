@@ -4,7 +4,7 @@ from plan_execute_agent import PlanExecuteAgent, AgentState, build_agent_graph
 from typing import Dict, Any, List
 
 # ページタイトルと説明
-st.set_page_config(page_title="Plan and Executeエージェント", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Plan and Executeエージェント", page_icon="🧠")
 st.title("Plan and Execute型 設計書調査エージェント")
 st.markdown("""
 このページでは、Plan and Execute型のAIエージェントを使用して、設計書に関する質問に回答します。
