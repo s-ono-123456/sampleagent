@@ -65,7 +65,6 @@ SUBPLAN_PROMPT_TEMPLATE = """\
 1回のステップの中に複数回のアクションを含むこともできます。
 - 必要な情報を特定するための検索ステップ (step_type: search)
 - 収集した情報を分析するためのステップ (step_type: analyze)
-- 最終的な回答を生成するための統合ステップ (step_type: synthesize)
 
 また、各ステップの中でどのような作業を行うべきかを詳細に説明してください。
 できるだけ簡潔な内容として、複数の項目を含まないようにしてください。
@@ -107,7 +106,7 @@ REVISION_PROMPT_TEMPLATE = """\
 実行結果:
 {execution_results}
 
-修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze/synthesize）を含めてください。
+修正された計画を作成してください。各ステップには番号、説明、アクションタイプ（search/analyze）を含めてください。
 """
 
 # 情報充足度評価用プロンプト
@@ -176,7 +175,7 @@ class MainPlanStep(BaseModel):
 class SubPlanStep(BaseModel):
     step_number: int = Field(description="ステップの番号")
     description: str = Field(description="ステップの説明")
-    step_type: str = Field(description="ステップのタイプ（search, analyze, synthesize）")
+    step_type: str = Field(description="ステップのタイプ（search, analyze）")
     step_action: str = Field(description="ステップの詳細な作業内容")
 
 # 実行計画全体を表すモデル
@@ -207,7 +206,7 @@ class InformationSufficiencyAssessment(BaseModel):
 ###########################################################################
 
 # サブ計画作成ノード
-def create_plan(state: AgentState) -> AgentState:
+def create_subplan(state: AgentState) -> AgentState:
     """ユーザーの質問から実行計画を作成するノード"""
     llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
     
@@ -215,7 +214,7 @@ def create_plan(state: AgentState) -> AgentState:
     plan_prompt = ChatPromptTemplate.from_template(SUBPLAN_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してSubPlan形式での出力を強制
-    structured_llm = llm.with_structured_output(SubPlan)
+    sub_structured_llm = llm.with_structured_output(SubPlan)
 
     # 現在のステップを取得
     current_step = state.main_plan[state.current_step_index]
@@ -231,7 +230,7 @@ def create_plan(state: AgentState) -> AgentState:
     """
     
     # チェーンを実行して計画を生成
-    plan_chain = plan_prompt | structured_llm
+    plan_chain = plan_prompt | sub_structured_llm
     plan_result = plan_chain.invoke({"query": state.query, "main_plan": main_plan, "action": action})
     
     # Planオブジェクトをリストに変換
@@ -239,7 +238,8 @@ def create_plan(state: AgentState) -> AgentState:
     
     # 状態を更新して返す
     return {
-        "sub_plan": steps
+        "sub_plan": steps,
+        "current_substep_index": 0
     }
 
 # ベクトル検索関数
@@ -252,10 +252,10 @@ def search_documents(step_description: str, query: str) -> str:
     search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してMultiSearchQuery形式での出力を強制
-    structured_llm = llm.with_structured_output(MultiSearchQuery)
+    search_structured_llm = llm.with_structured_output(MultiSearchQuery)
     
     # チェーンを実行して検索クエリを生成
-    search_chain = search_prompt | structured_llm
+    search_chain = search_prompt | search_structured_llm
     search_result = search_chain.invoke({
         "step_description": step_description, 
         "query": query
@@ -311,7 +311,7 @@ def search_documents(step_description: str, query: str) -> str:
 def execute_search_step(state: AgentState) -> AgentState:
     """検索ステップの実行"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_substep_index]
+    current_step = state.sub_plan[state.current_substep_index]
     step_description = current_step.get("description", "")
     
     try:
@@ -350,7 +350,7 @@ def execute_search_step(state: AgentState) -> AgentState:
 def execute_analyze_step(state: AgentState) -> AgentState:
     """分析ステップの実行"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_substep_index]
+    current_step = state.sub_plan[state.current_substep_index]
     step_description = current_step.get("description", "")
     
     # LLMの初期化
@@ -408,12 +408,9 @@ def execute_analyze_step(state: AgentState) -> AgentState:
 
 def execute_synthesize_step(state: AgentState) -> AgentState:
     """統合ステップの実行"""
-    # 現在のステップを取得
-    current_step = state.main_plan[state.current_substep_index]
     
     # 統合ステップは特別な処理をせず、後で実行される
     execution_result = {
-        "step": current_step,
         "result": "統合ステップは後で実行されます",
         "success": True
     }
@@ -424,7 +421,8 @@ def execute_synthesize_step(state: AgentState) -> AgentState:
     
     # 次のステップへ
     return {
-        "current_substep_index": state.current_substep_index + 1,
+        "current_substep_index": 0,
+        "current_step_index": state.current_step_index + 1,
         "execution_results": execution_results,
         "need_plan_revision": False
     }
@@ -432,7 +430,7 @@ def execute_synthesize_step(state: AgentState) -> AgentState:
 def execute_unknown_step(state: AgentState) -> AgentState:
     """不明なステップタイプの実行（エラー処理）"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_substep_index]
+    current_step = state.sub_plan[state.current_substep_index]
     step_type = current_step.get("step_type", "")
     
     # 不明なアクションタイプ
@@ -457,12 +455,11 @@ def execute_unknown_step(state: AgentState) -> AgentState:
 def determine_substep_type(state: AgentState) -> str:
     """現在のステップタイプを判断し、対応するノード名を返す"""
     # 全ステップが完了していたら終了
-    if state.current_substep_index >= len(state.main_plan):
-        state.current_step_index = state.current_step_index + 1
-        return "completed"
+    if state.current_substep_index >= len(state.sub_plan):
+        return "execute_synthesize"
     
     # 現在のステップタイプを取得
-    current_step = state.main_plan[state.current_substep_index]
+    current_step = state.sub_plan[state.current_substep_index]
     step_type = current_step.get("step_type", "")
     
     # ステップタイプに基づいてノード名を返す
@@ -470,8 +467,6 @@ def determine_substep_type(state: AgentState) -> str:
         return "execute_search"
     elif step_type == "analyze":
         return "execute_analyze"
-    elif step_type == "synthesize":
-        return "execute_synthesize"
     else:
         return "execute_unknown"
 
@@ -482,7 +477,7 @@ def build_execution_subgraph():
     execution_graph = StateGraph(AgentState)
     
     # ノードの追加
-    execution_graph.add_node("create_plan", create_plan)
+    execution_graph.add_node("create_subplan", create_subplan)
     execution_graph.add_node("execute_search", execute_search_step)
     execution_graph.add_node("execute_analyze", execute_analyze_step)
     execution_graph.add_node("execute_synthesize", execute_synthesize_step)
@@ -497,11 +492,11 @@ def build_execution_subgraph():
             "completed": END
         }
     # エントリーポイントからの条件分岐
-    execution_graph.add_edge(START, "create_plan")
-    execution_graph.add_conditional_edges("create_plan", determine_substep_type, path_map=path_map)
+    execution_graph.add_edge(START, "create_subplan")
+    execution_graph.add_conditional_edges("create_subplan", determine_substep_type, path_map=path_map)
     execution_graph.add_conditional_edges("execute_search", determine_substep_type, path_map=path_map)
     execution_graph.add_conditional_edges("execute_analyze", determine_substep_type, path_map=path_map)
-    execution_graph.add_conditional_edges("execute_synthesize", determine_substep_type, path_map=path_map)
+    execution_graph.add_edge("execute_synthesize", END)
     # 不明なタイプの場合はサブグラフを終わらせて再計画を促す必要がある。
     execution_graph.add_edge("execute_unknown", END)
     
