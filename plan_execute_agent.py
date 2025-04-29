@@ -41,6 +41,26 @@ PLAN_PROMPT_TEMPLATE = """\
 最終ステップの結果が最終的な答えになるようにしてください。
 各ステップには必要な情報をすべて含めて、スキップしないようにしてください。
 
+また、各ステップの中でどのような作業を行うべきかを詳細に説明してください。
+できるだけ簡潔な内容として、複数の項目を含まないようにしてください。
+"""
+
+# 計画作成用プロンプト
+SUBPLAN_PROMPT_TEMPLATE = """\
+あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
+ユーザーからの以下の依頼事項に答えるため、以下の計画を作成しました。
+これから以下のアクションを行ってもらいます。
+
+依頼事項: {query}
+計画: {main_plan}
+実施アクション: {action}
+
+与えられた依頼事項に対して、単純なステップバイステップな計画を作成してください。
+この計画は正しく実行すれば正しい答えを導き出せるような個々のタスクで構成されている必要があります。
+余計な手順は追加しないでください。
+最終ステップの結果が最終的な答えになるようにしてください。
+各ステップには必要な情報をすべて含めて、スキップしないようにしてください。
+
 計画の中では以下のステップを利用することができます。
 1回のステップの中に複数回のアクションを含むこともできます。
 - 必要な情報を特定するための検索ステップ (step_type: search)
@@ -136,7 +156,9 @@ class AgentState(BaseModel):
     """LangGraphで使用するエージェントの状態"""
     query: str = Field(description="ユーザーからの質問")
     main_plan: List[Dict[str, Any]] = Field(default_factory=list, description="解決のためのメイン計画ステップ")
+    sub_plan: List[Dict[str, Any]] = Field(default_factory=list, description="解決のためのサブ計画ステップ")
     current_step_index: int = Field(default=0, description="現在実行中のステップのインデックス")
+    current_substep_index: int = Field(default=0, description="現在実行中のサブステップのインデックス")
     execution_results: List[Dict[str, Any]] = Field(default_factory=list, description="実行結果のリスト")
     need_plan_revision: bool = Field(default=False, description="計画修正が必要かどうか")
     information_sufficient: bool = Field(default=True, description="収集した情報が十分かどうか")
@@ -145,16 +167,25 @@ class AgentState(BaseModel):
     revision_count: int = Field(default=0, description="計画修正の回数")
 
 # 計画のステップを表すモデル
-class PlanStep(BaseModel):
+class MainPlanStep(BaseModel):
+    step_number: int = Field(description="ステップの番号")
+    description: str = Field(description="ステップの説明")
+    step_action: str = Field(description="ステップの詳細な作業内容")
+
+# 計画のステップを表すモデル
+class SubPlanStep(BaseModel):
     step_number: int = Field(description="ステップの番号")
     description: str = Field(description="ステップの説明")
     step_type: str = Field(description="ステップのタイプ（search, analyze, synthesize）")
     step_action: str = Field(description="ステップの詳細な作業内容")
 
+# 実行計画全体を表すモデル
+class MainPlan(BaseModel):
+    steps: List[MainPlanStep] = Field(description="計画のステップリスト")
 
 # 実行計画全体を表すモデル
-class Plan(BaseModel):
-    steps: List[PlanStep] = Field(description="計画のステップリスト")
+class SubPlan(BaseModel):
+    steps: List[SubPlanStep] = Field(description="計画のステップリスト")
 
 # 検索クエリを表すモデル
 class SearchQuery(BaseModel):
@@ -174,6 +205,42 @@ class InformationSufficiencyAssessment(BaseModel):
 ###########################################################################
 # サブグラフノードの定義
 ###########################################################################
+
+# サブ計画作成ノード
+def create_plan(state: AgentState) -> AgentState:
+    """ユーザーの質問から実行計画を作成するノード"""
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=0)
+    
+    # プロンプトテンプレートを使用
+    plan_prompt = ChatPromptTemplate.from_template(SUBPLAN_PROMPT_TEMPLATE)
+    
+    # with_structured_outputを使用してSubPlan形式での出力を強制
+    structured_llm = llm.with_structured_output(SubPlan)
+
+    # 現在のステップを取得
+    current_step = state.main_plan[state.current_step_index]
+    step_description = current_step.get("description", "")
+    step_infomation = current_step.get("step_action", "")
+    descriptions = []
+    for step in state.main_plan:
+        descriptions.append(step.get("description", ""))
+    main_plan ="\n- ".join(descriptions)
+    action =f"""
+    概要: {step_description}
+    詳細: {step_infomation}
+    """
+    
+    # チェーンを実行して計画を生成
+    plan_chain = plan_prompt | structured_llm
+    plan_result = plan_chain.invoke({"query": state.query, "main_plan": main_plan, "action": action})
+    
+    # Planオブジェクトをリストに変換
+    steps = [step.model_dump() for step in plan_result.steps]
+    
+    # 状態を更新して返す
+    return {
+        "sub_plan": steps
+    }
 
 # ベクトル検索関数
 def search_documents(step_description: str, query: str) -> str:
@@ -244,7 +311,7 @@ def search_documents(step_description: str, query: str) -> str:
 def execute_search_step(state: AgentState) -> AgentState:
     """検索ステップの実行"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_step_index]
+    current_step = state.main_plan[state.current_substep_index]
     step_description = current_step.get("description", "")
     
     try:
@@ -275,7 +342,7 @@ def execute_search_step(state: AgentState) -> AgentState:
     
     # 次のステップへ、または計画修正が必要かどうかを判断
     return {
-        "current_step_index": state.current_step_index + 1,
+        "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
         "need_plan_revision": not execution_result["success"]
     }
@@ -283,7 +350,7 @@ def execute_search_step(state: AgentState) -> AgentState:
 def execute_analyze_step(state: AgentState) -> AgentState:
     """分析ステップの実行"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_step_index]
+    current_step = state.main_plan[state.current_substep_index]
     step_description = current_step.get("description", "")
     
     # LLMの初期化
@@ -334,7 +401,7 @@ def execute_analyze_step(state: AgentState) -> AgentState:
     
     # 次のステップへ、または計画修正が必要かどうかを判断
     return {
-        "current_step_index": state.current_step_index + 1,
+        "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
         "need_plan_revision": not execution_result["success"]
     }
@@ -342,7 +409,7 @@ def execute_analyze_step(state: AgentState) -> AgentState:
 def execute_synthesize_step(state: AgentState) -> AgentState:
     """統合ステップの実行"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_step_index]
+    current_step = state.main_plan[state.current_substep_index]
     
     # 統合ステップは特別な処理をせず、後で実行される
     execution_result = {
@@ -357,7 +424,7 @@ def execute_synthesize_step(state: AgentState) -> AgentState:
     
     # 次のステップへ
     return {
-        "current_step_index": state.current_step_index + 1,
+        "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
         "need_plan_revision": False
     }
@@ -365,7 +432,7 @@ def execute_synthesize_step(state: AgentState) -> AgentState:
 def execute_unknown_step(state: AgentState) -> AgentState:
     """不明なステップタイプの実行（エラー処理）"""
     # 現在のステップを取得
-    current_step = state.main_plan[state.current_step_index]
+    current_step = state.main_plan[state.current_substep_index]
     step_type = current_step.get("step_type", "")
     
     # 不明なアクションタイプ
@@ -381,20 +448,21 @@ def execute_unknown_step(state: AgentState) -> AgentState:
     
     # 次のステップへ、修正が必要
     return {
-        "current_step_index": state.current_step_index + 1,
+        "current_substep_index": state.current_substep_index + 1,
         "execution_results": execution_results,
         "need_plan_revision": True
     }
 
-# 実行するステップタイプを判断する関数
-def determine_step_type(state: AgentState) -> str:
+# 実行するサブステップタイプを判断する関数
+def determine_substep_type(state: AgentState) -> str:
     """現在のステップタイプを判断し、対応するノード名を返す"""
     # 全ステップが完了していたら終了
-    if state.current_step_index >= len(state.main_plan):
+    if state.current_substep_index >= len(state.main_plan):
+        state.current_step_index = state.current_step_index + 1
         return "completed"
     
     # 現在のステップタイプを取得
-    current_step = state.main_plan[state.current_step_index]
+    current_step = state.main_plan[state.current_substep_index]
     step_type = current_step.get("step_type", "")
     
     # ステップタイプに基づいてノード名を返す
@@ -414,12 +482,12 @@ def build_execution_subgraph():
     execution_graph = StateGraph(AgentState)
     
     # ノードの追加
+    execution_graph.add_node("create_plan", create_plan)
     execution_graph.add_node("execute_search", execute_search_step)
     execution_graph.add_node("execute_analyze", execute_analyze_step)
     execution_graph.add_node("execute_synthesize", execute_synthesize_step)
     execution_graph.add_node("execute_unknown", execute_unknown_step)
 
-    
     # 条件分岐の設定
     path_map = {
             "execute_search": "execute_search",
@@ -429,15 +497,16 @@ def build_execution_subgraph():
             "completed": END
         }
     # エントリーポイントからの条件分岐
-    execution_graph.add_conditional_edges(START, determine_step_type,path_map=path_map)
-    execution_graph.add_conditional_edges("execute_search", determine_step_type,path_map=path_map)
-    execution_graph.add_conditional_edges("execute_analyze", determine_step_type,path_map=path_map)
-    execution_graph.add_conditional_edges("execute_synthesize", determine_step_type,path_map=path_map)
+    execution_graph.add_edge(START, "create_plan")
+    execution_graph.add_conditional_edges("create_plan", determine_substep_type, path_map=path_map)
+    execution_graph.add_conditional_edges("execute_search", determine_substep_type, path_map=path_map)
+    execution_graph.add_conditional_edges("execute_analyze", determine_substep_type, path_map=path_map)
+    execution_graph.add_conditional_edges("execute_synthesize", determine_substep_type, path_map=path_map)
     # 不明なタイプの場合はサブグラフを終わらせて再計画を促す必要がある。
     execution_graph.add_edge("execute_unknown", END)
     
     # サブグラフをコンパイルして返す
-    return execution_graph.compile(name='SubAgentGraph', description='サブエージェントの実行グラフ')
+    return execution_graph.compile(name='SubAgentGraph')
 
 ###########################################################################
 # メイングラフノードの定義
@@ -451,8 +520,8 @@ def create_plan(state: AgentState) -> AgentState:
     # プロンプトテンプレートを使用
     plan_prompt = ChatPromptTemplate.from_template(PLAN_PROMPT_TEMPLATE)
     
-    # with_structured_outputを使用してPlan形式での出力を強制
-    structured_llm = llm.with_structured_output(Plan)
+    # with_structured_outputを使用してMainPlan形式での出力を強制
+    structured_llm = llm.with_structured_output(MainPlan)
     
     # チェーンを実行して計画を生成
     plan_chain = plan_prompt | structured_llm
@@ -505,7 +574,7 @@ def revise_plan(state: AgentState) -> AgentState:
     revision_prompt = ChatPromptTemplate.from_template(REVISION_PROMPT_TEMPLATE)
     
     # with_structured_outputを使用してPlan形式での出力を強制
-    structured_llm = llm.with_structured_output(Plan)
+    structured_llm = llm.with_structured_output(MainPlan)
     
     try:
         # チェーンを実行して修正計画を生成
@@ -531,6 +600,7 @@ def revise_plan(state: AgentState) -> AgentState:
     # 状態を更新して返す
     return {
         "current_step_index": 0,
+        "current_substep_index": 0,
         "main_plan": revised_steps,
         "need_plan_revision": False
     }
@@ -705,7 +775,7 @@ def build_agent_graph():
     workflow.set_entry_point("create_plan")
     
     # コンパイルしてグラフを返す
-    return workflow.compile(name='MainAgentGraph' , description='メインエージェントの実行グラフ')
+    return workflow.compile(name='MainAgentGraph')
 
 class PlanExecuteAgent:
     """
