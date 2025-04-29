@@ -880,9 +880,9 @@ class PlanExecuteAgent:
         return {
             "status": "success",
             "query": query,
-            "main_plan": result['main_plan'],
-            "execution_results": result['execution_results'],
-            "answer": result['final_answer']
+            "main_plan": result[1]['main_plan'],
+            "execution_results": result[1]['execution_results'],
+            "answer": result[1]['final_answer']
         }
             
 
