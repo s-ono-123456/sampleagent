@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Dict, List, Any, Optional, Tuple, TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, END
 from vector_store_loader import load_vector_stores
+
 
 # 環境変数の設定
 os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
@@ -48,12 +50,19 @@ class SearchQuery(BaseModel):
 class MultiSearchQuery(BaseModel):
     queries: List[str] = Field(description="複数の検索クエリリスト")
 
+# 情報充足度評価の結果を表すモデル
+class InformationSufficiencyAssessment(BaseModel):
+    sufficiency_score: int = Field(description="情報の充足度スコア (1-5)")
+    missing_info: List[str] = Field(default_factory=list, description="不足している情報のリスト")
+    need_more_research: bool = Field(description="再調査が必要かどうか")
+    reason: str = Field(description="再調査が必要な理由や十分と判断した理由")
+
 # 計画作成ノード
 def create_plan(state: AgentState) -> AgentState:
     """ユーザーの質問から実行計画を作成するノード"""
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
-    plan_prompt = ChatPromptTemplate.from_template("""
+    plan_prompt = ChatPromptTemplate.from_template("""\
     あなたは設計書に関する調査・質問対応を行うAIアシスタントです。
     ユーザーからの以下の質問に答えるための調査計画を作成してください。
     
@@ -106,23 +115,14 @@ def execute_step(state: AgentState) -> AgentState:
             search_result = search_documents(step_description, state.query)
             
             # 検索結果とクエリがタプルとして返される場合の処理
-            if isinstance(search_result, tuple) and len(search_result) == 2:
-                result, search_queries = search_result
-                # 検索クエリを実行結果に含める
-                execution_result = {
-                    "step": current_step,
-                    "result": result,
-                    "success": bool(result) and "情報が見つかりません" not in result,
-                    "search_queries": search_queries
-                }
-            else:
-                # 旧バージョンのサポートのため
-                result = search_result
-                execution_result = {
-                    "step": current_step,
-                    "result": result,
-                    "success": bool(result) and "情報が見つかりません" not in result
-                }
+            result, search_queries = search_result
+            # 検索クエリを実行結果に含める
+            execution_result = {
+                "step": current_step,
+                "result": result,
+                "success": bool(result) and "情報が見つかりません" not in result,
+                "search_queries": search_queries
+            }
             
             success = execution_result["success"]
             
@@ -138,7 +138,7 @@ def execute_step(state: AgentState) -> AgentState:
                 result = "分析する情報がありません。検索ステップが失敗したか、実行されていません。"
                 success = False
             else:
-                analyze_prompt = ChatPromptTemplate.from_template("""
+                analyze_prompt = ChatPromptTemplate.from_template("""\
                 以下の情報を分析し、ステップに関する洞察を提供してください:
                 
                 ステップ: {step_description}
@@ -215,7 +215,7 @@ def search_documents(step_description: str, query: str) -> str:
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
     # 複数の検索クエリの生成
-    search_prompt = ChatPromptTemplate.from_template("""
+    search_prompt = ChatPromptTemplate.from_template("""\
     以下のステップを実行するために適切な検索クエリを複数作成してください:
     
     ステップ: {step_description}
@@ -282,20 +282,14 @@ def search_documents(step_description: str, query: str) -> str:
     return result_text, search_queries
 
 # 計画評価ノード
-def evaluate_plan(state: AgentState):
+def evaluate_plan(state: AgentState) -> str:
     """計画の状態を評価し、次に実行すべきノードを決定"""
     if state.need_plan_revision:
-        return {
-            "next_step": "revise_plan"
-        }
+        return "revise_plan"
     elif state.current_step_index < len(state.plan):
-        return {
-            "next_step": "execute_step"
-        }
+        return "execute_step"
     else:
-        return {
-            "next_step": "assess_information_sufficiency"
-        }
+        return "assess_information_sufficiency"
 
 # 計画修正ノード
 def revise_plan(state: AgentState) -> AgentState:
@@ -303,14 +297,14 @@ def revise_plan(state: AgentState) -> AgentState:
     llm = ChatOpenAI(model_name="gpt-4.1-nano", temperature=0)
     
     # 実行結果のフォーマット
-    execution_results_text = "\n".join([
-        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +
-        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"
-        for i, r in enumerate(state.execution_results)
+    execution_results_text = "\n".join([\
+        f"ステップ {r.get('step', {}).get('step_number', i+1)} " +\
+        f"({r.get('step', {}).get('action_type', 'unknown')}): {r.get('result', '')}"\
+        for i, r in enumerate(state.execution_results)\
     ])
     
     # 計画修正プロンプト
-    revision_prompt = ChatPromptTemplate.from_template("""
+    revision_prompt = ChatPromptTemplate.from_template("""\
     次の計画を実行中に問題が発生しました。より効果的な計画を提案してください。
     
     元の質問: {query}
@@ -384,25 +378,34 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     4. **詳細度**: 質問に答えるために十分な詳細情報が含まれているか
     5. **最新性**: 情報が最新かどうか（もし判断できる場合）
     
-    評価結果を以下の形式で出力してください:
-    - 充足度 (1-5): [1-5の数字、1が最も不十分、5が最も十分]
-    - 不足している情報: [具体的に不足している情報を列挙]
-    - 再調査が必要: [はい/いいえ]
-    - 理由: [再調査が必要な理由や追加すべき視点]
+    充足度スコアは1〜5の整数で評価してください（1が最も不十分、5が最も十分）。
+    不足している情報がある場合は具体的に列挙してください。
+    再調査が必要かどうかを判断し（スコアが5未満の場合は必要）、その理由を説明してください。
     """)
     
-    # 評価の実行
-    assessment_chain = assessment_prompt | llm
+    # with_structured_outputを使用してInformationSufficiencyAssessment形式での出力を強制
+    structured_llm = llm.with_structured_output(InformationSufficiencyAssessment)
+    
+    # チェーンを実行して評価結果を生成
+    assessment_chain = assessment_prompt | structured_llm
     assessment_result = assessment_chain.invoke({
         "query": state.query,
         "all_results": all_results
     })
     
-    # 評価結果のテキストを取得
-    assessment_text = assessment_result.content if hasattr(assessment_result, 'content') else str(assessment_result)
+    # 構造化された評価結果からデータを取得
+    sufficiency_score = assessment_result.sufficiency_score
+    missing_info = assessment_result.missing_info
+    need_more_research = assessment_result.need_more_research
+    reason = assessment_result.reason
     
-    # 再調査が必要かどうかの判断（簡易的な判断ロジック）
-    need_more_research = "再調査が必要: はい" in assessment_text
+    # 評価結果の詳細情報
+    assessment_details = {
+        "sufficiency_score": sufficiency_score,
+        "missing_info": missing_info,
+        "need_more_research": need_more_research,
+        "reason": reason
+    }
     
     # 判断結果に基づいて次のステップを設定
     if need_more_research:
@@ -415,7 +418,13 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     # 状態を更新して返す
     return {
         "next_step": next_step,
-        "information_sufficient": information_sufficient
+        "information_sufficient": information_sufficient,
+        "execution_results": state.execution_results + [{
+            "step": {"step_number": len(state.execution_results) + 1, "description": "情報充足度評価", "action_type": "evaluate"},
+            "result": f"充足度評価: {sufficiency_score}/5 - {'十分' if information_sufficient else '不十分'}\n理由: {reason}",
+            "success": True,
+            "assessment_details": assessment_details
+        }]
     }
 
 # 回答生成ノード
@@ -469,20 +478,16 @@ def build_agent_graph():
     # ノードの追加
     workflow.add_node("create_plan", create_plan)
     workflow.add_node("execute_step", execute_step)
-    workflow.add_node("evaluate_plan", evaluate_plan)
     workflow.add_node("revise_plan", revise_plan)
     workflow.add_node("assess_information_sufficiency", assess_information_sufficiency)
     workflow.add_node("generate_answer", generate_answer)
     
     # エッジの追加（ノード間の接続）
     workflow.add_edge("create_plan", "execute_step")
-
-    def _check_condition(state: AgentState) -> str:
-        return_value = state.next_step
-        return return_value
-
+    
+    # execute_stepノードから直接条件分岐
     workflow.add_conditional_edges(
-        "evaluate_plan", _check_condition,
+        "execute_step", evaluate_plan,
         path_map = {
             "revise_plan": "revise_plan",
             "execute_step": "execute_step",
@@ -492,7 +497,8 @@ def build_agent_graph():
     
     # 情報充足度評価ノードからの条件分岐
     workflow.add_conditional_edges(
-        "assess_information_sufficiency", _check_condition,
+        "assess_information_sufficiency", 
+        lambda state: state.next_step,
         path_map = {
             "revise_plan": "revise_plan",
             "generate_answer": "generate_answer"
@@ -500,7 +506,6 @@ def build_agent_graph():
     )
     
     workflow.add_edge("revise_plan", "execute_step")
-    workflow.add_edge("execute_step", "evaluate_plan")
     workflow.add_edge("generate_answer", END)
     
     # 開始ノードの設定
@@ -541,7 +546,7 @@ class PlanExecuteAgent:
         initial_state = AgentState(query=query)
         
         # グラフの実行
-        result = self.agent_graph.invoke(initial_state)
+        result = self.agent_graph.invoke(initial_state, {"recursion_limit": 25})
         
         # 結果の作成
         return {
