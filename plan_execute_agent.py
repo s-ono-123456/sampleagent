@@ -380,7 +380,7 @@ def assess_information_sufficiency(state: AgentState) -> AgentState:
     
     充足度スコアは1〜5の整数で評価してください（1が最も不十分、5が最も十分）。
     不足している情報がある場合は具体的に列挙してください。
-    再調査が必要かどうかを判断し（スコアが5未満の場合は必要）、その理由を説明してください。
+    再調査が必要かどうかを判断し（スコアが4未満の場合は必要）、その理由を説明してください。
     """)
     
     # with_structured_outputを使用してInformationSufficiencyAssessment形式での出力を強制
