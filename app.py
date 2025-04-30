@@ -92,7 +92,6 @@ if user_input:
                         processing_results["check_result"] = chunk['check_result']
                         status.update(label="処理完了", state="complete")
             
-                
                 # チャット履歴に回答を追加
                 st.session_state.messages.append({"role": "assistant", "content": processing_results["final_response"] if processing_results["final_response"] else "回答を生成できませんでした。"})
             
@@ -119,9 +118,8 @@ if user_input:
         try:
             # LangGraphのメモリーダイドを取得して表示
             mermaid_code = gragh_build().get_graph().draw_mermaid()
-            
-            st.code(mermaid_code, language="mermaid")
             st_mermaid(mermaid_code)
+            st.code(mermaid_code, language="mermaid")
 
         except Exception as e:
             st.error(f"フローチャートの表示中にエラーが発生しました: {str(e)}")
