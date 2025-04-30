@@ -14,7 +14,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from vector_store_loader import load_vector_stores
+from services.vector_store_loader import load_vector_stores
 
 MODEL_NAME = "gpt-4.1-nano"
 embedding_model_name = "pkshatech/GLuCoSE-base-ja-v2"

@@ -10,7 +10,7 @@ from langchain_community.vectorstores import FAISS
 from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, END, START
-from vector_store_loader import load_vector_stores, load_vector_stores_category
+from services.vector_store_loader import load_vector_stores, load_vector_stores_category
 
 
 # 環境変数の設定
