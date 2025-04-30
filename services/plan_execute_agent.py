@@ -68,6 +68,9 @@ SUBPLAN_PROMPT_TEMPLATE = """\
 
 また、各ステップの中でどのような作業を行うべきかを詳細に説明してください。
 できるだけ簡潔な内容として、複数の項目を含まないようにしてください。
+
+いままでのアクションで取得した情報は以下の通りです、
+{all_insights}
 """
 
 # 検索クエリ生成用プロンプト
@@ -254,10 +257,18 @@ def create_subplan(state: AgentState) -> AgentState:
     概要: {step_description}
     詳細: {step_infomation}
     """
-    
+    # 実行結果のフォーマット
+    conclusion_results = []
+    # 現在の計画のanalyzeステップの結果
+    for i, result in enumerate(state.conclusion_results):
+        conclusion_results.append(
+            f"ステップ {result.get('step', {}).get('step_number', i+1)} (洞察): {result.get('conclusion_results', '')}"
+        )
+    all_insights = "\n\n".join(conclusion_results)
+
     # チェーンを実行して計画を生成
     plan_chain = plan_prompt | sub_structured_llm
-    plan_result = plan_chain.invoke({"query": state.query, "main_plan": main_plan, "action": action})
+    plan_result = plan_chain.invoke({"query": state.query, "main_plan": main_plan, "action": action, "all_insights": all_insights})
     
     # Planオブジェクトをリストに変換
     steps = [step.model_dump() for step in plan_result.steps]
