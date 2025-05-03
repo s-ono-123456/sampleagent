@@ -44,7 +44,12 @@ async def multi_main():
                 # make sure you start your weather server on port 8000
                 "url": "http://localhost:8000/sse",
                 "transport": "sse",
-            }
+            },
+            "playwright": {
+                # make sure you start your playwright server on port 8931
+                "url": "http://localhost:8931/sse",
+                "transport": "sse",
+            },
         }
     ) as client:
         agent = create_react_agent(model, client.get_tools())
