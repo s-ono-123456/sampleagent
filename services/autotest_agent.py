@@ -21,6 +21,12 @@ model = ChatOpenAI(model="gpt-4.1-mini")
 # スクリーンショット保存用のディレクトリを作成
 SCREENSHOTS_DIR = "screenshots"
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+# 環境変数の設定
+os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
+os.environ["LANGSMITH_PROJECT"] = "Playwright Test"
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
 class GraphState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
@@ -79,7 +85,7 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
 次の手順を実行してください: {current_plan}
 直前のツールの出力: {last_content}
 """
-    
+
     plan_prompt = ChatPromptTemplate.from_template(TEST_AGENT_TEMPLATE)
     model_with_tools = model.bind_tools(tools)
     plan = state["plans"]
@@ -92,8 +98,6 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
     if last_message is not None:
         last_content = last_message.content
         # print(f"直前のツールの出力: {last_message}")
-    
-    state["messages"] = []
 
     testagent_chain = plan_prompt | model_with_tools
     response = testagent_chain.invoke(
@@ -103,22 +107,6 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
         }
     )
     
-#     response = model_with_tools.invoke([
-#         SystemMessage(content="""
-# あなたはテスト自動化の専門家です。
-# あなたは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
-# 直前にツールを使用している場合、その出力を利用して必要な情報を抽出してください。
-
-# 与えられていない場合は、始めての実行として考えてください。"""),
-#         HumanMessage(
-#             content=f"""
-# 次の手順を実行してください: {current_plan}
-# 直前のツールの出力: {last_content}
-# """)
-#     ])
-    # print(f"エージェントの応答: {response}")
-    # print(type(response))
-
     return {
         "messages": [response],
         "completed_plans": False,
@@ -145,7 +133,7 @@ def end_subgraph(state: GraphState) -> GraphState:
         "subplan_index": 0,
     }
 
-def build_subgraph(model, tools, memory=None) -> StateGraph:
+def build_subgraph(model, tools, memory) -> StateGraph:
     """サブグラフを構築するノード"""
     build_subgraph = StateGraph(GraphState)
     tool_node = ToolNode(tools)
@@ -244,12 +232,6 @@ def create_graph(model, tools):
     return app
     
 async def main(user_input=None):
-    # 環境変数の設定
-    os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
-    os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-    os.environ["LANGSMITH_PROJECT"] = "Playwright Test"
-    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
     async with MultiServerMCPClient(
         {
             "playwright": {
