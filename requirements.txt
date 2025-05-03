@@ -11,3 +11,4 @@ langgraph
 langchain-tavily
 streamlit
 streamlit-mermaid
+langchain-mcp-adapters

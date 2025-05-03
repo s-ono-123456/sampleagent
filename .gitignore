@@ -46,3 +46,6 @@ secrets.json
 # Logs
 logs/
 *.log
+
+# Screenshots and output files
+screenshots/
