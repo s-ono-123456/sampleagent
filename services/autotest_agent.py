@@ -231,7 +231,7 @@ def create_graph(model, tools):
     
     return app
     
-async def main(user_input=None):
+async def main(user_input=None, graph_config=None):
     async with MultiServerMCPClient(
         {
             "playwright": {
@@ -243,7 +243,9 @@ async def main(user_input=None):
             },
         }
     ) as client:
-        graph_config = {"configurable": {"thread_id": "12345"}}
+        if graph_config is None:
+            # デフォルトのグラフ設定を使用する場合は、以下のように指定します。
+            graph_config = {"configurable": {"thread_id": "12345"}}
         tools = client.get_tools()
         agent = create_graph(model, tools)
         if user_input is None:
