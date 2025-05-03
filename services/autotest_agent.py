@@ -15,6 +15,7 @@ import datetime  # 日付時刻の処理に必要
 import asyncio
 from langgraph.checkpoint.memory import MemorySaver
 import base64  # base64エンコードされた画像の処理に必要
+from langchain.prompts import ChatPromptTemplate
 
 model = ChatOpenAI(model="gpt-4.1-mini")
 # スクリーンショット保存用のディレクトリを作成
@@ -68,6 +69,18 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
             "completed_plans": True,
             "subplan_index": 0,
         }
+    TEST_AGENT_TEMPLATE = """
+あなたはテスト自動化の専門家です。
+あなたは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
+直前にツールを使用している場合、その出力を利用して必要な情報を抽出してください。
+
+与えられていない場合は、始めての実行として考えてください。
+
+次の手順を実行してください: {current_plan}
+直前のツールの出力: {last_content}
+"""
+    
+    plan_prompt = ChatPromptTemplate.from_template(TEST_AGENT_TEMPLATE)
     model_with_tools = model.bind_tools(tools)
     plan = state["plans"]
     current_plan_index = state["current_plan_index"]
@@ -81,20 +94,28 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
         # print(f"直前のツールの出力: {last_message}")
     
     state["messages"] = []
-    
-    response = model_with_tools.invoke([
-        SystemMessage(content="""
-あなたはテスト自動化の専門家です。
-あなたは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
-直前にツールを使用している場合、その出力を利用して必要な情報を抽出してください。
 
-与えられていない場合は、始めての実行として考えてください。"""),
-        HumanMessage(
-            content=f"""
-次の手順を実行してください: {current_plan}
-直前のツールの出力: {last_content}
-""")
-    ])
+    testagent_chain = plan_prompt | model_with_tools
+    response = testagent_chain.invoke(
+        {
+            "current_plan": current_plan,
+            "last_content": last_content,
+        }
+    )
+    
+#     response = model_with_tools.invoke([
+#         SystemMessage(content="""
+# あなたはテスト自動化の専門家です。
+# あなたは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
+# 直前にツールを使用している場合、その出力を利用して必要な情報を抽出してください。
+
+# 与えられていない場合は、始めての実行として考えてください。"""),
+#         HumanMessage(
+#             content=f"""
+# 次の手順を実行してください: {current_plan}
+# 直前のツールの出力: {last_content}
+# """)
+#     ])
     # print(f"エージェントの応答: {response}")
     # print(type(response))
 
@@ -124,7 +145,7 @@ def end_subgraph(state: GraphState) -> GraphState:
         "subplan_index": 0,
     }
 
-def build_subgraph(model, tools):
+def build_subgraph(model, tools, memory=None) -> StateGraph:
     """サブグラフを構築するノード"""
     build_subgraph = StateGraph(GraphState)
     tool_node = ToolNode(tools)
@@ -143,7 +164,6 @@ def build_subgraph(model, tools):
     )
     build_subgraph.add_edge("end_node", END)
     build_subgraph.add_edge("tool_node", "testagent")
-    memory = MemorySaver()
 
     return build_subgraph.compile(name="subgraph", checkpointer=memory)
 
@@ -202,9 +222,10 @@ def create_graph(model, tools):
     
     workflow = StateGraph(GraphState)
     
+    memory = MemorySaver()
     # ノードの追加
     workflow.add_node("planning", lambda state: planning(state, model, tools))
-    workflow.add_node("agent", build_subgraph(model, tools))
+    workflow.add_node("agent", build_subgraph(model, tools, memory=memory))
     
     # エッジの追加
     workflow.add_edge(START, "planning")
@@ -216,14 +237,19 @@ def create_graph(model, tools):
             False: END
         }
     )
-    memory = MemorySaver()
     
     # グラフのコンパイル
-    app = workflow.compile(checkpointer=memory)
+    app = workflow.compile(checkpointer=memory, name="test_agent")
     
     return app
     
-async def main():
+async def main(user_input=None):
+    # 環境変数の設定
+    os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
+    os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
+    os.environ["LANGSMITH_PROJECT"] = "Playwright Test"
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
     async with MultiServerMCPClient(
         {
             "playwright": {
@@ -238,23 +264,24 @@ async def main():
         graph_config = {"configurable": {"thread_id": "12345"}}
         tools = client.get_tools()
         agent = create_graph(model, tools)
-        user_input = """
-1.http://localhost:8080/testにアクセスして、スクリーンショットを取得してください。
-2.受注番号に1234を入力して、
-  受注年月日に2023-10-01を入力してください。
-  発送日に2023-10-02を入力してください。
-  受注金額に2020円を入力してください。
-3.ここまで行ったらスクリーンショットを取得してください。
-4.登録ボタンを押下して、スクリーンショットを取得してください。
-5.戻るボタンを押下して、スクリーンショットを取得してください。
-6.受注番号に1235を入力して、
-  受注年月日に2023-10-02を入力してください。
-  発送日に2023-10-03を入力してください。
-  受注金額に10250円を入力してください。
-7.ここまで行ったらスクリーンショットを取得してください。
-8.登録ボタンを押下して、スクリーンショットを取得してください。
-9.戻るボタンを押下して、スクリーンショットを取得してください。
-        """
+        if user_input is None:
+            user_input = """
+    1.http://localhost:8080/testにアクセスして、スクリーンショットを取得してください。
+    2.受注番号に1234を入力して、
+    受注年月日に2023-10-01を入力してください。
+    発送日に2023-10-02を入力してください。
+    受注金額に2020円を入力してください。
+    3.ここまで行ったらスクリーンショットを取得してください。
+    4.登録ボタンを押下して、スクリーンショットを取得してください。
+    5.戻るボタンを押下して、スクリーンショットを取得してください。
+    6.受注番号に1235を入力して、
+    受注年月日に2023-10-02を入力してください。
+    発送日に2023-10-03を入力してください。
+    受注金額に10250円を入力してください。
+    7.ここまで行ったらスクリーンショットを取得してください。
+    8.登録ボタンを押下して、スクリーンショットを取得してください。
+    9.戻るボタンを押下して、スクリーンショットを取得してください。
+            """
         
         # 初期状態
         initial_state = {
