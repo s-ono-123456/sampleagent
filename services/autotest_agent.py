@@ -100,12 +100,10 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
         # print(f"直前のツールの出力: {last_message}")
 
     testagent_chain = plan_prompt | model_with_tools
-    response = testagent_chain.invoke(
-        {
-            "current_plan": current_plan,
-            "last_content": last_content,
-        }
-    )
+    response = testagent_chain.invoke({
+        "current_plan": current_plan,
+        "last_content": last_content,
+    })
     
     return {
         "messages": [response],
