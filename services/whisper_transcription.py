@@ -4,15 +4,16 @@ import time
 from typing import Dict, List, Optional, Any, Union
 import numpy as np
 from pathlib import Path
-import librosa  # ffmpegの代わりにlibrosaを使用
 import soundfile as sf  # 音声ファイル読み書き用
 import torch
 from pydub import AudioSegment
 from faster_whisper import WhisperModel
 from pydantic import BaseModel, Field
+import traceback
 
 # LangGraph用のインポート
 from langgraph.graph import StateGraph, END
+from services.config.settings import setup_environment, SCREENSHOTS_DIR
 
 # 状態定義
 class WhisperTranscriptionState(BaseModel):
@@ -41,7 +42,7 @@ def validate_file(state: WhisperTranscriptionState) -> WhisperTranscriptionState
             raise ValueError(f"ファイルが存在しません: {state.audio_file}")
         
         # 拡張子のチェック
-        supported_formats = ['.wav', '.mp3', '.flac', '.m4a', '.ogg']
+        supported_formats = ['.wav', '.mp3', '.flac', '.ogg']
         file_ext = os.path.splitext(state.audio_file)[1].lower()
         
         if file_ext not in supported_formats:
@@ -52,17 +53,12 @@ def validate_file(state: WhisperTranscriptionState) -> WhisperTranscriptionState
         if file_size > 500:  # 500MB以上はエラー
             raise ValueError(f"ファイルサイズが大きすぎます: {file_size:.2f}MB (最大500MB)")
         
-        # librosaを使って音声メタデータを抽出
+        # soundfileを使って音声メタデータを抽出
         try:
-            # ヘッダー情報のみを読み込むことで高速化
-            y = None
-            sr = librosa.get_samplerate(state.audio_file)
-            
             # ファイルが開けるか確認するために短いセグメントだけ読み込む
-            y, _ = librosa.load(state.audio_file, sr=sr, duration=0.1)
-            
-            if y is None or sr is None:
-                raise ValueError("音声データの読み込みに失敗しました")
+            with sf.SoundFile(state.audio_file) as f:
+                if f.frames == 0 or f.samplerate == 0:
+                    raise ValueError("音声データの読み込みに失敗しました")
             
             # 状態を更新
             state.status = "file_validated"
@@ -86,12 +82,25 @@ def preprocess_audio(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
         if state.status == "error":
             return state
         
-        # librosaを使用して音声をロード（サンプルレート16kHz、モノラルに変換）
-        audio_data, sample_rate = librosa.load(state.audio_file, sr=16000, mono=True)
+        # soundfileを使用して音声をロード
+        audio_data, sample_rate = sf.read(state.audio_file, dtype='float32')
+        
+        # ステレオをモノラルに変換
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+            
+        # サンプルレートを16kHzに変換
+        if sample_rate != 16000:
+            # scipy.signalを使用してリサンプリング
+            from scipy import signal
+            audio_length = len(audio_data)
+            new_length = int(audio_length * 16000 / sample_rate)
+            audio_data = signal.resample(audio_data, new_length)
         
         # 音量正規化
-        if np.max(np.abs(audio_data)) < 0.1:
-            audio_data = librosa.util.normalize(audio_data)
+        max_amp = np.max(np.abs(audio_data))
+        if max_amp < 0.1 and max_amp > 0:
+            audio_data = audio_data / max_amp * 0.9
         
         # 状態を更新
         state.audio_data = audio_data
@@ -100,6 +109,7 @@ def preprocess_audio(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
     except Exception as e:
         state.status = "error"
         state.error_message = f"音声前処理エラー: {str(e)}"
+        traceback.print_exc()  # デバッグ用にスタックトレースを出力
     
     # 処理時間を記録
     state.processing_time["preprocess_audio"] = time.time() - start_time
@@ -119,7 +129,7 @@ def load_model(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
         compute_type = "float16" if device == "cuda" else "int8"
         
         # モデルをロード
-        model = WhisperModel("large-v3", device=device, compute_type=compute_type)
+        model = WhisperModel("large-v3-turbo", device=device, compute_type=compute_type)
         
         # 状態を更新
         state.model = model
@@ -151,7 +161,7 @@ def detect_language(state: WhisperTranscriptionState) -> WhisperTranscriptionSta
         audio_segment = state.audio_data[:int(16000 * 30)] if len(state.audio_data) > 16000 * 30 else state.audio_data
         
         # 言語検出の実行
-        segments, info = state.model.transcribe(audio_segment, task="detect_language")
+        segments, info = state.model.transcribe(audio_segment, task="transcribe")
         detected_language = info.language
         
         # 状態を更新
@@ -161,6 +171,7 @@ def detect_language(state: WhisperTranscriptionState) -> WhisperTranscriptionSta
     except Exception as e:
         state.status = "error"
         state.error_message = f"言語検出エラー: {str(e)}"
+        traceback.print_exc()
     
     # 処理時間を記録
     state.processing_time["detect_language"] = time.time() - start_time
@@ -478,13 +489,8 @@ def build_transcription_graph() -> StateGraph:
     workflow.add_edge("format_output", "evaluate_result")
     
     # evaluate_resultノードから条件に基づいて分岐
-    workflow.add_conditional_edges(
-        "evaluate_result",
-        lambda state, result: result["next"],
-        {
-            "finalize": "finalize"
-        }
-    )
+    # 現状、finalizeノードに直接遷移するように設定
+    workflow.add_edge("evaluate_result", "finalize")
     
     # 最終ノードの設定
     workflow.add_edge("finalize", END)
@@ -528,3 +534,5 @@ class WhisperTranscriptionService:
 # result = service.transcribe("path/to/audio.mp3", format_type="srt")
 # print(result.transcript)
 # print(f"出力ファイル: {result.output_file}")
+
+

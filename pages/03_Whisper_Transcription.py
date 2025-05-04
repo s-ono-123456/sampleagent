@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+import japanize_matplotlib
 
 # 親ディレクトリをパスに追加して、servicesモジュールをインポートできるようにする
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -53,7 +54,7 @@ def sidebar_content():
         st.subheader("モデル設定")
         model_info = st.expander("モデル情報", expanded=False)
         with model_info:
-            st.write("**モデル**: Faster-Whisper large-v3")
+            st.write("**モデル**: Faster-Whisper large-v3-turbo")
             st.write("**概要**: OpenAIのWhisperモデルの最適化版で、最高精度を提供します。")
             st.write("**サイズ**: 約3GB")
             st.write("**サポート言語**: 99言語")
@@ -109,7 +110,7 @@ def sidebar_content():
             st.divider()
             st.write("**ファイル制限**:")
             st.write("最大サイズ: 500MB")
-            st.write("対応形式: WAV, MP3, FLAC, M4A, OGG")
+            st.write("対応形式: WAV, MP3, FLAC, OGG")
         
         # 著者情報
         st.sidebar.divider()
@@ -173,13 +174,18 @@ def render_upload_tab():
                     )
                     end_time = time.time()
                     
+                    # デバッグ情報を表示（開発中のみ）
+                    st.write(f"結果の型: {type(result)}")
+                    
+                    # LangGraphの結果は辞書のような形式でアクセスする
                     # 結果をセッション状態に保存
-                    st.session_state.transcription_result = result.transcript
-                    st.session_state.process_status = result.status
-                    st.session_state.segments = result.segments
-                    st.session_state.processing_time = result.processing_time
-                    st.session_state.confidence_score = result.confidence_score
-                    st.session_state.output_file = result.output_file
+                    # 新しい形式（辞書形式でのアクセス）
+                    st.session_state.transcription_result = result["transcript"]
+                    st.session_state.process_status = result["status"]
+                    st.session_state.segments = result["segments"]
+                    st.session_state.processing_time = result["processing_time"]
+                    st.session_state.confidence_score = result["confidence_score"]
+                    st.session_state.output_file = result["output_file"]
                     
                     # 結果表示タブに切り替え
                     st.rerun()
@@ -357,7 +363,7 @@ def main():
     st.title("🎤 Faster-Whisper 音声文字起こしサービス")
     st.write("""
     高精度な音声文字起こしサービスです。音声ファイルをアップロードすると、
-    Faster-Whisperモデル(large-v3)を使用して文字起こしを行います。
+    Faster-Whisperモデル(large-v3-turbo)を使用して文字起こしを行います。
     複数の言語と出力形式をサポートしています。
     """)
     
