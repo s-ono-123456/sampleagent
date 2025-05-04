@@ -6,64 +6,23 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage, SystemMessage, AnyMessage, ToolMessage, AIMessage, RemoveMessage
-from typing import Any, Callable, Dict, Iterable, List, Optional, TypedDict, Annotated
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from langgraph.graph import StateGraph, START, END, MessagesState, add_messages
-from pydantic import BaseModel, Field
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
-import datetime  # 日付時刻の処理に必要
 import asyncio
 from langgraph.checkpoint.memory import MemorySaver
-import base64  # base64エンコードされた画像の処理に必要
+
+# 共通化したファイルのインポート
+from services.config.settings import setup_environment, SCREENSHOTS_DIR
+from services.utils.screenshot_utils import process_screenshot
+from services.utils.graph_types import GraphState, TestPlan, TEST_AGENT_TEMPLATE, PLANNING_SYSTEM_PROMPT
 from langchain.prompts import ChatPromptTemplate
 
-model = ChatOpenAI(model="gpt-4.1-mini")
-# スクリーンショット保存用のディレクトリを作成
-SCREENSHOTS_DIR = "screenshots"
-os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 # 環境変数の設定
-os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
-os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGSMITH_PROJECT"] = "Playwright Test"
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
+setup_environment()
 
-class GraphState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    query: str
-    plans: Optional[List[str]]
-    current_plan_index: Optional[int]
-    completed: Optional[bool]
-    last_message: Optional[AnyMessage]
-    completed_plans: Optional[bool]
-    subplan_index: Optional[int]
-
-# Pydanticモデルを定義して計画の構造を記述
-class TestPlan(BaseModel):
-    steps: List[str] = Field(description="テスト実行の具体的な手順のリスト")
-
-# スクリーンショットを処理する関数
-def process_screenshot(message):
-    """
-    ツールのレスポンスからスクリーンショットを抽出して保存する
-    """
-    # ツールメッセージを処理
-    if isinstance(message, ToolMessage):
-        try:
-            # ツールメッセージから画像データを抽出
-            content = message.artifact
-            if content is not None:
-                base64_data = content[0].data
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                screenshot_path = os.path.join(SCREENSHOTS_DIR, f"screenshot_{timestamp}.png")
-                
-                with open(screenshot_path, "wb") as img_file:
-                    img_file.write(base64.b64decode(base64_data))
-                print(f"ツールからスクリーンショットを保存しました: {screenshot_path}")
-                return True
-        except Exception as e:
-            print(f"ツールレスポンスからのスクリーンショット保存に失敗しました: {e}")
-    return False
+model = ChatOpenAI(model="gpt-4.1-mini")
 
 ###########################################################################
 # サブグラフノードの定義
@@ -75,17 +34,7 @@ def create_testagent(state: GraphState, model, tools) -> GraphState:
             "completed_plans": True,
             "subplan_index": 0,
         }
-    TEST_AGENT_TEMPLATE = """
-あなたはテスト自動化の専門家です。
-あなたは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
-直前にツールを使用している場合、その出力を利用して必要な情報を抽出してください。
-
-与えられていない場合は、始めての実行として考えてください。
-
-次の手順を実行してください: {current_plan}
-直前のツールの出力: {last_content}
-"""
-
+    
     plan_prompt = ChatPromptTemplate.from_template(TEST_AGENT_TEMPLATE)
     model_with_tools = model.bind_tools(tools)
     plan = state["plans"]
@@ -161,18 +110,12 @@ def planning(state: GraphState, model, tools) -> GraphState:
     """クエリから具体的なテスト計画を作成するノード"""
     query = state["query"]
     
-    system_prompt = """あなたはテスト自動化の専門家です。
-後続のテスト実行ノードでは、Playwrightというブラウザを操作するツールを使用してテストを実行します。
-ユーザーからの指示に基づいて、ブラウザテストの具体的な実行手順を作成してください。
-各ステップは明確で具体的な1つの操作に分解してください。
-"""
-
     # with_structured_outputを使用して配列形式の出力を強制する
     structured_model = model.bind_tools(tools)
     structured_model = structured_model.with_structured_output(TestPlan)
     
     messages = [
-        SystemMessage(content=system_prompt),
+        SystemMessage(content=PLANNING_SYSTEM_PROMPT),
         HumanMessage(content=f"以下のテスト指示に対する具体的な実行手順を作成してください。各手順は1行で簡潔に記述してください。\n\n{query}")
     ]
     
