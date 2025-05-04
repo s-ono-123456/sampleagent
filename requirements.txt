@@ -13,3 +13,13 @@ streamlit
 streamlit-mermaid
 langchain-mcp-adapters
 nest-asyncio
+
+# 音声文字起こしに必要なライブラリ
+faster-whisper
+pydub
+torchaudio
+numpy
+scipy
+librosa  # 音声処理用
+soundfile  # 音声ファイル読み書き用
+matplotlib
