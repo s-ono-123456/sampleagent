@@ -108,3 +108,7 @@ streamlit run app.py --server.fileWatcherType none
 - FAISS
 - Streamlit
 - HuggingFace
+
+
+## リンク
+[DeepWiki プロジェクト](https://deepwiki.com/s-ono-123456/sampleagent)
