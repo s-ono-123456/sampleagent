@@ -1,1 +1,1 @@
-npx @playwright/mcp@latest --port 8931
+npx @playwright/mcp@latest --port 8931 --config config/playwright_config.json
