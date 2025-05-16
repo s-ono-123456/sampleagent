@@ -1,7 +1,7 @@
 # Create server parameters for stdio connection
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-import operator, os
+import operator, os, json
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
@@ -30,6 +30,31 @@ model = ChatOpenAI(model="gpt-4.1-mini")
 def create_testagent(state: GraphState, model, tools) -> GraphState:
     """エージェントノードを作成"""
     if state["subplan_index"] > 0:
+        # last_messageに格納されている前回のツール出力を取得する。
+        last_message = state["messages"][-1] if state["messages"] else None
+        if last_message is not None:
+            last_content = last_message.content
+            # last_contentを\nで区切ってリスト化してoutput.jsonに追記
+            output_path = "output.json"
+            try:
+                # last_contentを\nで分割しリスト化
+                last_content_list = [line for line in last_content.split("\n") if line.strip()]
+                if os.path.exists(output_path):
+                    with open(output_path, "r", encoding="utf-8") as f:
+                        try:
+                            data = json.load(f)
+                            if not isinstance(data, list):
+                                data = []
+                        except json.JSONDecodeError:
+                            data = []
+                else:
+                    data = []
+                data.append({"last_content": last_content_list})
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"output.jsonの書き込みエラー: {e}")
+        
         return {
             "completed_plans": True,
             "subplan_index": 0,
