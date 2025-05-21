@@ -24,3 +24,7 @@ librosa  # 音声処理用
 soundfile  # 音声ファイル読み書き用
 matplotlib
 japanize-matplotlib
+
+# SSH・Playwright用の依存パッケージ
+asyncssh
+playwright
