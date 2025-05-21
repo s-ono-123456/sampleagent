@@ -19,19 +19,30 @@ LOCAL_PORT = 2080
 REMOTE_HOST = '10.1.1.1'
 REMOTE_PORT = 80
 
+# プロキシサーバーの設定（必要に応じて値を変更してください）
+PROXY_HOST = 'proxy.example.com'  # プロキシサーバーのホスト名
+PROXY_PORT = 8080                # プロキシサーバーのポート
+PROXY_USERNAME = 'proxy_user'    # プロキシのユーザー名
+PROXY_PASSWORD = 'proxy_pass'    # プロキシのパスワード
+
 @asynccontextmanager
 async def ssh_port_forward():
     """
     SSHトンネルを作成し、localhost:2080→10.1.1.1:80 へのポートフォワードを行う。
+    プロキシサーバー経由でSSH接続する場合の設定も含む。
     """
     try:
+        # プロキシ経由でSSH接続するためのコネクタを作成
+        proxy_url = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+        proxy = asyncssh.ProxyCommand.connect_ssh_proxy(proxy_url)
         # SSH接続を確立し、ポートフォワードを設定
         conn = await asyncssh.connect(
             SSH_HOST,
             port=SSH_PORT,
             username=SSH_USER,
             password=SSH_PASSWORD,
-            known_hosts=None
+            known_hosts=None,
+            proxy=proxy
         )
         listener = await conn.forward_local_port('127.0.0.1', LOCAL_PORT, REMOTE_HOST, REMOTE_PORT)
         print(f"SSHポートフォワード開始: localhost:{LOCAL_PORT} → {REMOTE_HOST}:{REMOTE_PORT}")
