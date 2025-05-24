@@ -10,10 +10,102 @@ from pydub import AudioSegment
 from faster_whisper import WhisperModel
 from pydantic import BaseModel, Field
 import traceback
+from pyannote.audio import Pipeline  # 話者識別用ライブラリ
+from pyannote.audio.pipelines.utils.hook import ProgressHook
 
 # LangGraph用のインポート
 from langgraph.graph import StateGraph, END
-from services.config.settings import setup_environment, SCREENSHOTS_DIR
+# LangChain用のインポート
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain.schema import StrOutputParser
+
+MODEL_NAME = "large-v3-turbo"
+
+# 要約用プロンプトテンプレート定数
+SUMMARY_PROMPT_JA = """
+あなたは音声文字起こしの内容から議事録を作成する専門家です。
+与えられたテキストを以下のルールに則って議事録を作成してください ：
+
+# 入力テキストについて
+テキストには以下の情報が含まれています。
+・時系列に沿った内容の流れ（時間情報が含まれている場合）
+・話者ごとの主な発言や貢献（話者情報が含まれている場合）
+
+時間情報が提供されている場合は、それを活用して内容の流れや議論の進行を時系列で示してください。
+重要な転換点や話題の変化があった時間帯を要約に含めると理解が深まります。
+
+話者情報が提供されている場合は、各話者の識別子（SPEAKER_00、SPEAKER_01など）をもとに文脈から氏名を特定して、主要な発言内容や立場、意見を区別して要約してください。
+
+
+# 注意事項
+・文字起こしデータはAIによるもので、一部の書き起こしミスが含まれています。この点を考慮して、文脈を理解し、内容を整理してください
+・会議の基本情報（日時、場所、出席者など）を最初に記載してください。
+・会議での主要な「決定事項」を冒頭でまとめてください。
+・次に、「次回への持ち帰り事項」をまとめてください。
+・その後、各議題の見出しを設け、議題ごとに、議論の流れがわかるように会話形式で主要な発言を記載してください。
+・文書は簡潔かつ明瞭に記述してください。
+・専門用語や略語を使用する場合は、初回の使用時に定義を明記してください。
+・文脈として意味が不明な箇所は、文脈的に相応しいと合理的に推測される内容に修正、または削除してください。 
+・日本語で、簡潔かつ論理的に構成し、原文の意図を保持してください。
+・以下の議事録サンプルに従って文章を構成してください。
+
+# 議事録のサンプル
+```
+# ○○会議 議事録
+
+## 会議基本情報
+
+- **日時**: 2025/01/01 14:00-15:00
+- **場所**: 1375会議室
+- **出席者**: 鈴木部長、井上GM、佐藤、木村
+
+---
+
+## 決定事項
+
+- ○○を4/1から実施する方針に決定
+
+## 次回への持ち帰り事項
+
+- ○○を佐藤が検討し、1/12までに鈴木部長に報告する。
+- ○○を木村が確認し、1/11までに井上GMに報告する。
+
+---
+
+# 議事内容
+## 1. 新規参画者の紹介
+- 新規参画者を紹介します。木村です。（佐藤）
+- 木村です。よろしくお願いいたします。（木村）
+
+## 2.  議題１について
+- 議題１について説明します。井上さんよろしくお願いいたします。（佐藤）
+- 説明をいたします。（井上）
+
+
+```
+"""
+
+SUMMARY_PROMPT_EN = """
+You are an expert in summarizing transcribed audio content.
+Please summarize the given text as follows:
+
+1. Main topics and discussion points
+2. Important facts and information
+3. Decisions and next steps (if mentioned)
+4. Chronological flow of the content (if time information is provided)
+5. Key statements or contributions by each speaker (if speaker information is provided)
+
+If time information is provided, use it to show the flow of content and progression of discussion chronologically.
+Including key turning points or topic changes with their corresponding timestamps will enhance understanding.
+
+If speaker information is provided, please distinguish between the different speakers (SPEAKER_00, SPEAKER_01, etc.)
+in your summary, highlighting their main points or positions. For example, "SPEAKER_01 argued that..." to clearly
+attribute statements to specific speakers.
+
+The summary should be concise and logically structured, retaining the intent of the original text.
+Combine bullet points and short paragraphs to make it readable.
+"""
 
 # 状態定義
 class WhisperTranscriptionState(BaseModel):
@@ -30,6 +122,12 @@ class WhisperTranscriptionState(BaseModel):
     error_message: str = Field(default="", description="エラー発生時のメッセージ")
     model: Any = Field(default=None, description="ロードされたWhisperモデル")
     processing_time: Dict[str, float] = Field(default_factory=dict, description="各処理ステップの所要時間")
+    # 話者識別関連のフィールド
+    enable_diarization: bool = Field(default=False, description="話者識別機能を有効にするかどうか")
+    diarization_model: Any = Field(default=None, description="ロードされた話者識別モデル")
+    speaker_count: int = Field(default=0, description="検出された話者の数")
+    speaker_segments: List[Dict[str, Any]] = Field(default_factory=list, description="話者識別されたセグメント情報")
+    diarization_result: Any = Field(default=None, description="話者識別の生の結果オブジェクト")
 
 # ノード関数の実装
 def validate_file(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
@@ -129,7 +227,7 @@ def load_model(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
         compute_type = "float16" if device == "cuda" else "int8"
         
         # モデルをロード
-        model = WhisperModel("large-v3-turbo", device=device, compute_type=compute_type)
+        model = WhisperModel(MODEL_NAME, device=device, compute_type=compute_type)
         
         # 状態を更新
         state.model = model
@@ -238,6 +336,92 @@ def transcribe_audio(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
     
     return state
 
+def identify_speakers(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
+    """音声から話者を識別（ダイアリゼーション）するノード"""
+    start_time = time.time()
+    
+    try:
+        if state.status == "error" or not state.enable_diarization:
+            # 話者識別が有効でない場合はスキップ
+            return state
+        
+        # 一時ファイルの作成（PyAnnoteはファイルパスが必要なため）
+        temp_dir = tempfile.gettempdir()
+        temp_wav_path = os.path.join(temp_dir, "temp_diarization.wav")
+        
+        # AudioSegmentを使用して音声を16kHzのWAVに変換
+        audio = AudioSegment.from_file(state.audio_file)
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        audio.export(temp_wav_path, format="wav")
+        
+        # 話者識別モデルの読み込み
+        if state.diarization_model is None:
+            try:
+                # Hugging Faceからモデルを取得（アクセストークンが必要な場合があります）
+                state.diarization_model = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=os.environ.get("HF_TOKEN"),  # 環境変数からトークンを取得
+                )
+                
+                # GPUが利用可能な場合はGPUを使用
+                if torch.cuda.is_available():
+                    state.diarization_model = state.diarization_model.to(torch.device("cuda"))
+                    
+            except Exception as e:
+                raise ValueError(f"話者識別モデルの読み込みに失敗しました: {str(e)}")
+        
+        # 話者識別の実行
+        with ProgressHook() as hook:
+            diarization_result = state.diarization_model(temp_wav_path, hook=hook)
+        
+        # 話者識別結果の解析
+        speaker_segments = []
+        speaker_set = set()
+        
+        for turn, _, speaker in diarization_result.itertracks(yield_label=True):
+            speaker_set.add(speaker)
+            segment = {
+                "start": turn.start,
+                "end": turn.end,
+                "speaker": speaker
+            }
+            speaker_segments.append(segment)
+        
+        # セグメントに話者情報を追加
+        for whisper_segment in state.segments:
+            # 各Whisperセグメントの中央時間を計算
+            mid_time = (whisper_segment["start"] + whisper_segment["end"]) / 2
+            
+            # その時間に対応する話者を探す
+            matching_speaker = None
+            for speaker_segment in speaker_segments:
+                if speaker_segment["start"] <= mid_time <= speaker_segment["end"]:
+                    matching_speaker = speaker_segment["speaker"]
+                    break
+            
+            # 話者情報をセグメントに追加
+            whisper_segment["speaker"] = matching_speaker if matching_speaker else "unknown"
+        
+        # 状態を更新
+        state.speaker_count = len(speaker_set)
+        state.speaker_segments = speaker_segments
+        state.diarization_result = diarization_result
+        state.status = "speakers_identified"
+        
+        # 一時ファイルを削除
+        if os.path.exists(temp_wav_path):
+            os.remove(temp_wav_path)
+            
+    except Exception as e:
+        state.status = "error"
+        state.error_message = f"話者識別エラー: {str(e)}"
+        traceback.print_exc()
+    
+    # 処理時間を記録
+    state.processing_time["identify_speakers"] = time.time() - start_time
+    
+    return state
+
 def postprocess_text(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
     """文字起こし結果のテキスト後処理を行うノード"""
     start_time = time.time()
@@ -324,7 +508,13 @@ def format_output(state: WhisperTranscriptionState) -> WhisperTranscriptionState
         if state.format_type == "text":
             output_file = os.path.join(output_dir, f"{base_filename}.txt")
             with open(output_file, "w", encoding="utf-8") as f:
-                f.write(state.transcript)
+                # 話者識別が有効な場合は話者情報を含める
+                if state.enable_diarization and state.speaker_count > 0:
+                    for segment in state.segments:
+                        speaker = segment.get("speaker", "不明")
+                        f.write(f"【{speaker}】: {segment['text']}\n")
+                else:
+                    f.write(state.transcript)
                 
         elif state.format_type == "srt":
             output_file = os.path.join(output_dir, f"{base_filename}.srt")
@@ -336,7 +526,12 @@ def format_output(state: WhisperTranscriptionState) -> WhisperTranscriptionState
                     
                     f.write(f"{i}\n")
                     f.write(f"{start_time_str} --> {end_time_str}\n")
-                    f.write(f"{segment['text']}\n\n")
+                    
+                    # 話者識別が有効な場合は話者情報を含める
+                    if state.enable_diarization and "speaker" in segment:
+                        f.write(f"【{segment['speaker']}】: {segment['text']}\n\n")
+                    else:
+                        f.write(f"{segment['text']}\n\n")
         
         elif state.format_type == "vtt":
             output_file = os.path.join(output_dir, f"{base_filename}.vtt")
@@ -348,7 +543,12 @@ def format_output(state: WhisperTranscriptionState) -> WhisperTranscriptionState
                     end_time_str = format_timestamp(segment["end"], msec=True)
                     
                     f.write(f"{start_time_str} --> {end_time_str}\n")
-                    f.write(f"{segment['text']}\n\n")
+                    
+                    # 話者識別が有効な場合は話者情報を含める
+                    if state.enable_diarization and "speaker" in segment:
+                        f.write(f"【{segment['speaker']}】: {segment['text']}\n\n")
+                    else:
+                        f.write(f"{segment['text']}\n\n")
         
         elif state.format_type == "json":
             import json
@@ -360,6 +560,19 @@ def format_output(state: WhisperTranscriptionState) -> WhisperTranscriptionState
                 "segments": state.segments,
                 "confidence_score": state.confidence_score
             }
+            
+            # 話者識別が有効な場合は話者情報を含める
+            if state.enable_diarization:
+                result["speaker_count"] = state.speaker_count
+                # 整形された話者情報を追加
+                formatted_speaker_segments = []
+                for speaker_segment in state.speaker_segments:
+                    formatted_speaker_segments.append({
+                        "start": speaker_segment["start"],
+                        "end": speaker_segment["end"],
+                        "speaker": speaker_segment["speaker"]
+                    })
+                result["speaker_segments"] = formatted_speaker_segments
             
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
@@ -473,6 +686,7 @@ def build_transcription_graph() -> StateGraph:
     workflow.add_node("load_model", load_model)
     workflow.add_node("detect_language", detect_language)
     workflow.add_node("transcribe_audio", transcribe_audio)
+    workflow.add_node("identify_speakers", identify_speakers)
     workflow.add_node("postprocess_text", postprocess_text)
     workflow.add_node("format_output", format_output)
     workflow.add_node("evaluate_result", evaluate_result)
@@ -484,7 +698,8 @@ def build_transcription_graph() -> StateGraph:
     workflow.add_edge("preprocess_audio", "load_model")
     workflow.add_edge("load_model", "detect_language")
     workflow.add_edge("detect_language", "transcribe_audio")
-    workflow.add_edge("transcribe_audio", "postprocess_text")
+    workflow.add_edge("transcribe_audio", "identify_speakers")
+    workflow.add_edge("identify_speakers", "postprocess_text")
     workflow.add_edge("postprocess_text", "format_output")
     workflow.add_edge("format_output", "evaluate_result")
     
@@ -501,11 +716,12 @@ def build_transcription_graph() -> StateGraph:
 class WhisperTranscriptionService:
     def __init__(self):
         self.graph = build_transcription_graph()
-    
+        
     def transcribe(self, 
                   audio_file: str, 
                   language: str = "",
-                  format_type: str = "text") -> WhisperTranscriptionState:
+                  format_type: str = "text",
+                  enable_diarization: bool = True) -> WhisperTranscriptionState:
         """
         音声ファイルの文字起こしを実行する
         
@@ -513,26 +729,150 @@ class WhisperTranscriptionService:
             audio_file: 音声ファイルのパス
             language: 言語コード（指定しない場合は自動検出）
             format_type: 出力形式（text, srt, vtt, json）
+            enable_diarization: 話者識別機能を有効にするかどうか
             
         Returns:
             文字起こし処理の結果
-        """
+        """        
         # 入力状態の準備
         input_state = WhisperTranscriptionState(
             audio_file=audio_file,
             language=language,
-            format_type=format_type
+            format_type=format_type,
+            enable_diarization=enable_diarization
         )
-        
         # グラフの実行
         result = self.graph.invoke(input_state)
         
         return result
-
-# 使用例：
-# service = WhisperTranscriptionService()
-# result = service.transcribe("path/to/audio.mp3", format_type="srt")
-# print(result.transcript)
-# print(f"出力ファイル: {result.output_file}")
+    def summarize_transcription(self, text: str, language: str = "ja", segments: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        文字起こし結果を要約する
+        
+        Args:
+            text: 要約する文字起こしテキスト
+            language: 言語コード（デフォルトは日本語）
+            segments: 文字起こしのセグメント情報（時間情報と話者情報を含む）
+            
+        Returns:
+            要約結果を含む辞書
+        """
+        import time
+        
+        start_time = time.time()
+        
+        try:
+            # タイムスタンプ情報と話者情報を含むプロンプトを作成
+            time_info_text = ""
+            speaker_info_text = ""
+            
+            # 話者情報が存在するかチェック
+            has_speaker_info = False
+            if segments and len(segments) > 0:
+                for segment in segments:
+                    if "speaker" in segment and segment["speaker"]:
+                        has_speaker_info = True
+                        break
+            
+            if segments and len(segments) > 0:
+                # セグメント情報から時間情報を抽出
+                time_info_text = "\n\n【時間情報】\n"
+                # 重要な変化点を検出するため、一定間隔でセグメントを選択
+                step = max(1, len(segments) // 10)  # 最大10個程度の時間情報を含める
+                for i in range(0, len(segments), step):
+                    segment = segments[i]
+                    start_time_str = format_timestamp(segment["start"], msec=False)
+                    
+                    # 話者情報を含める場合
+                    if has_speaker_info and "speaker" in segment and segment["speaker"]:
+                        time_info_text += f"{start_time_str} - 【{segment['speaker']}】 {segment['text']}\n"
+                    else:
+                        time_info_text += f"{start_time_str} - {segment['text']}\n"
+                
+                # 最後のセグメントも追加
+                if len(segments) > i + 1:
+                    last_segment = segments[-1]
+                    start_time_str = format_timestamp(last_segment["start"], msec=False)
+                    
+                    # 話者情報を含める場合
+                    if has_speaker_info and "speaker" in last_segment and last_segment["speaker"]:
+                        time_info_text += f"{start_time_str} - 【{last_segment['speaker']}】 {last_segment['text']}\n"
+                    else:
+                        time_info_text += f"{start_time_str} - {last_segment['text']}\n"
+                
+                # 話者情報のサマリーを追加
+                if has_speaker_info:
+                    # 各話者の発言数と重要な発言を集計
+                    speaker_counts = {}
+                    speaker_samples = {}
+                    
+                    for segment in segments:
+                        if "speaker" in segment and segment["speaker"]:
+                            speaker = segment["speaker"]
+                            if speaker in speaker_counts:
+                                speaker_counts[speaker] += 1
+                                # 各話者につき3つまでのサンプル発言を保存
+                                if len(speaker_samples[speaker]) < 3:
+                                    speaker_samples[speaker].append(segment["text"])
+                            else:
+                                speaker_counts[speaker] = 1
+                                speaker_samples[speaker] = [segment["text"]]
+                    
+                    # 話者情報のサマリーを構築
+                    speaker_info_text = "\n\n【話者情報】\n"
+                    for speaker, count in speaker_counts.items():
+                        speaker_info_text += f"{speaker}: {count}回の発言\n"
+                        speaker_info_text += f"サンプル発言:\n"
+                        for sample in speaker_samples[speaker]:
+                            speaker_info_text += f"- {sample}\n"
+                        speaker_info_text += "\n"
+            
+            # 言語に応じたプロンプトの調整
+            if language == "ja":
+                system_prompt = SUMMARY_PROMPT_JA
+                user_prompt = f"以下の文字起こし内容を要約してください:\n\n{text}{time_info_text}{speaker_info_text}"
+            elif language == "en":
+                system_prompt = SUMMARY_PROMPT_EN
+                user_prompt = f"Please summarize the following transcription content:\n\n{text}{time_info_text}{speaker_info_text}"
+            else:
+                # その他の言語は日本語をデフォルトとして使用
+                system_prompt = SUMMARY_PROMPT_JA
+                user_prompt = f"以下の文字起こし内容を要約してください:\n\n{text}{time_info_text}{speaker_info_text}"
+            
+            # LangChainを使用して要約を生成
+            # プロンプトテンプレートの作成
+            system_message_prompt = SystemMessagePromptTemplate.from_template(system_prompt)
+            human_message_prompt = HumanMessagePromptTemplate.from_template(user_prompt)
+            chat_prompt = ChatPromptTemplate.from_messages([
+                system_message_prompt,
+                human_message_prompt
+            ])
+            
+            # LLMの初期化
+            llm = ChatOpenAI(
+                model="gpt-4.1-nano",  # モデルは環境に応じて調整
+                temperature=0.3        # 低い温度で一貫性のある要約
+            )
+            
+            # チェーンの作成と実行
+            chain = chat_prompt | llm | StrOutputParser()
+            summary = chain.invoke({})
+            
+            # 処理時間を計算
+            processing_time = time.time() - start_time
+            
+            return {
+                "summary": summary,
+                "status": "completed",
+                "processing_time": processing_time
+            }
+            
+        except Exception as e:
+            return {
+                "summary": None,
+                "status": "error",
+                "error_message": str(e),
+                "processing_time": time.time() - start_time
+            }
 
 

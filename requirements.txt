@@ -14,17 +14,18 @@ streamlit-mermaid
 langchain-mcp-adapters
 nest-asyncio
 
-# 音声文字起こしに必要なライブラリ
+# for whisper
 faster-whisper
 pydub
 torchaudio
 numpy
 scipy
-librosa  # 音声処理用
-soundfile  # 音声ファイル読み書き用
+librosa
+soundfile
 matplotlib
 japanize-matplotlib
+pyannote.audio
 
-# SSH・Playwright用の依存パッケージ
+# playwright
 asyncssh
 playwright
