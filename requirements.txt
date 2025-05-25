@@ -13,6 +13,7 @@ streamlit
 streamlit-mermaid
 langchain-mcp-adapters
 nest-asyncio
+pymupdf4llm
 
 # for whisper
 faster-whisper
