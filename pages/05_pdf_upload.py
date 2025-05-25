@@ -2,6 +2,9 @@ import streamlit as st
 import os
 from services.pdf_to_markdown import convert_pdf_to_markdown
 
+# wideレイアウトを有効化
+st.set_page_config(layout="wide")
+
 # 保存先ディレクトリ
 UPLOAD_DIR = "uploads"
 MARKDOWN_DIR = "markdown"
@@ -26,13 +29,14 @@ if uploaded_file is not None:
     md_path = convert_pdf_to_markdown(pdf_path, MARKDOWN_DIR)
     st.success(f"Markdown変換完了: {os.path.basename(md_path)}")
 
-    # Markdown内容を表示
-    with open(md_path, encoding="utf-8") as f:
-        md_content = f.read()
-    st.subheader("変換結果（Markdownプレビュー）")
-    st.markdown(md_content)
+    # 変換後にPDFファイルを削除
+    try:
+        os.remove(pdf_path)
+        st.info(f"変換後、PDFファイルを削除しました: {uploaded_file.name}")
+    except Exception as e:
+        st.warning(f"PDFファイルの削除に失敗しました: {e}")
 
-    # Markdownファイルのダウンロードリンク
+    # Markdownファイルのダウンロードリンク（プレビューの上に移動）
     with open(md_path, "rb") as f:
         st.download_button(
             label="Markdownファイルをダウンロード",
@@ -40,6 +44,12 @@ if uploaded_file is not None:
             file_name=os.path.basename(md_path),
             mime="text/markdown"
         )
+
+    # Markdown内容を表示
+    with open(md_path, encoding="utf-8") as f:
+        md_content = f.read()
+    st.subheader("変換結果（Markdownプレビュー）")
+    st.markdown(md_content)
 
 # markdownディレクトリ内の既存Markdown一覧表示
 st.sidebar.header("保存済みMarkdown一覧")
