@@ -20,9 +20,6 @@ def convert_pdf_to_markdown(pdf_path: str, output_dir: str) -> str:
                                 image_path=image_dir,  # 画像の保存先ディレクトリ
                                 )
     
-    # markdown_text内の画像パス「(markdown/images/」を「(images/」に置換
-    markdown_text = markdown_text.replace('(markdown/images/', '(images/')
-    
     # Markdown形式で保存
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown_text)
