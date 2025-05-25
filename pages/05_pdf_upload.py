@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import re
 from services.pdf_to_markdown import convert_pdf_to_markdown
 
 # wideレイアウトを有効化
@@ -13,7 +14,7 @@ MARKDOWN_DIR = "markdown"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(MARKDOWN_DIR, exist_ok=True)
 
-st.title("PDF→Markdown変換ツール（pymupdf4llm利用）")
+st.title("PDF→Markdown変換ツール")
 
 # ファイルアップロードUI
 uploaded_file = st.file_uploader("PDFファイルをアップロードしてください", type=["pdf"])
@@ -43,10 +44,10 @@ if uploaded_file is not None:
         md_content = f.read()
     st.subheader("変換結果（Markdownプレビュー）")
 
-    # --- Markdownと画像をまとめてzipでダウンロードする処理（ボタンを上に移動） ---
+    # --- Markdownと画像をまとめてzipでダウンロードする処理 ---
     import io
     import zipfile
-    import re  # 正規表現モジュール
+    # 正規表現モジュールは既にインポート済み
     # 画像パスを抽出
     image_pattern = r'!\[[^\]]*\]\(([^\)]+)\)'
     image_paths = re.findall(image_pattern, md_content)
@@ -72,17 +73,7 @@ if uploaded_file is not None:
     )
     # --- zipダウンロードここまで ---
 
-    # Markdownファイルのダウンロードリンク（プレビューの上に移動）
-    with open(md_path, "rb") as f:
-        st.download_button(
-            label="Markdownファイルをダウンロード",
-            data=f,
-            file_name=os.path.basename(md_path),
-            mime="text/markdown"
-        )
-
     # --- 画像とテキストを順番に表示する処理 ---
-    import re  # 正規表現モジュール
     # 画像付きMarkdownのパース用正規表現
     pattern = r'(!\[[^\]]*\]\([^\)]+\))'
     parts = re.split(pattern, md_content)
@@ -104,10 +95,3 @@ if uploaded_file is not None:
                 st.markdown(part)
     # --- 画像とテキスト順次表示ここまで ---
 
-# markdownディレクトリ内の既存Markdown一覧表示
-st.sidebar.header("保存済みMarkdown一覧")
-md_files = [f for f in os.listdir(MARKDOWN_DIR) if f.endswith(".md")]
-for md_file in md_files:
-    if st.sidebar.button(md_file):
-        with open(os.path.join(MARKDOWN_DIR, md_file), encoding="utf-8") as f:
-            st.markdown(f.read())
