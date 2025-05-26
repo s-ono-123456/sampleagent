@@ -2,6 +2,13 @@ import streamlit as st
 import os
 import re
 from services.pdf_to_markdown import convert_pdf_to_markdown
+import PyPDF2  # PDF結合用ライブラリを追加
+
+# win32com.clientのインポートをtry-exceptでラップ
+try:
+    import win32com.client  # win32comをインポート
+except ImportError:
+    win32com = None  # インポート失敗時はNoneにする
 
 # wideレイアウトを有効化
 st.set_page_config(layout="wide")
@@ -37,9 +44,57 @@ if uploaded_file is not None:
         # PDFの場合はそのまま
         pdf_path = input_path
     elif ext == ".xlsx":
-        # Excelの場合はxlsx2pdfでPDFに変換
-        # これから実装
-        pass
+        # Excel→PDF変換の前にwin32comが使えるかチェック
+        if win32com is None:
+            st.error("win32com.clientがインポートできません。pywin32がインストールされているか確認してください。")
+            pdf_path = None
+        else:
+            try:
+                # Excelアプリケーションの起動を試みる
+                excel = win32com.client.Dispatch("Excel.Application")
+                excel.Visible = False  # Excelウィンドウを表示しない
+                try:
+                    wb = excel.Workbooks.Open(os.path.abspath(input_path))
+                    # シートごとにPDFを一時保存し、後で結合する
+                    sheet_pdfs = []  # 一時PDFファイルのパスリスト
+                    for i, sheet in enumerate(wb.Sheets):
+                        # 各シートをアクティブにしてPDF出力
+                        sheet.Select()
+                        sheet_pdf_path = os.path.splitext(input_path)[0] + f"_sheet{i+1}.pdf"
+                        wb.ActiveSheet.ExportAsFixedFormat(0, sheet_pdf_path)
+                        sheet_pdfs.append(sheet_pdf_path)
+                    wb.Close(False)
+                    # 複数PDFを結合
+                    if len(sheet_pdfs) > 1:
+                        # PyPDF2.PdfMergerをwith文で使用してリソースを自動解放
+                        merged_pdf_path = os.path.splitext(input_path)[0] + "_merged.pdf"
+                        with PyPDF2.PdfMerger() as merger:
+                            for pdf in sheet_pdfs:
+                                with open(pdf, "rb") as f:
+                                    merger.append(f)
+                            with open(merged_pdf_path, "wb") as fout:
+                                merger.write(fout)
+                        pdf_path = merged_pdf_path
+                        # 一時PDF削除
+                        for pdf in sheet_pdfs:
+                            os.remove(pdf)
+                    elif len(sheet_pdfs) == 1:
+                        pdf_path = sheet_pdfs[0]
+                    else:
+                        pdf_path = None
+                    if pdf_path:
+                        st.info(f"Excelファイルの全シートをPDFに変換・結合しました: {os.path.basename(pdf_path)}")
+                    else:
+                        st.warning("Excelファイルにシートが見つかりませんでした。PDFの生成に失敗しました。")
+                except Exception as e:
+                    st.error(f"Excel→PDF変換に失敗しました: {e}")
+                    pdf_path = None
+                finally:
+                    excel.Quit()
+            except Exception as e:
+                # ExcelのCOM起動自体が失敗した場合
+                st.error(f"Excelアプリケーションの起動に失敗しました。Excelがインストールされているか、ビット数が一致しているか確認してください。詳細: {e}")
+                pdf_path = None
     else:
         st.error("対応していないファイル形式です。PDFまたはExcelファイルをアップロードしてください。")
 
