@@ -20,6 +20,20 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.schema import StrOutputParser
 
+# ログ出力用
+import logging
+
+# ログディレクトリとファイルの設定
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'whisper_transcription.log')
+logging.basicConfig(
+    filename=log_file,
+    level=logging.ERROR,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    encoding='utf-8'
+)
+
 MODEL_NAME = "large-v3-turbo"
 
 # 要約用プロンプトテンプレート定数
@@ -166,6 +180,7 @@ def validate_file(state: WhisperTranscriptionState) -> WhisperTranscriptionState
     except Exception as e:
         state.status = "error"
         state.error_message = f"ファイル検証エラー: {str(e)}"
+        logging.error(f"ファイル検証エラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["validate_file"] = time.time() - start_time
@@ -207,7 +222,8 @@ def preprocess_audio(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
     except Exception as e:
         state.status = "error"
         state.error_message = f"音声前処理エラー: {str(e)}"
-        traceback.print_exc()  # デバッグ用にスタックトレースを出力
+        logging.error(f"音声前処理エラー: {e}", exc_info=True)  # エラーログ出力
+        traceback.print_exc()  # デバッグ用
     
     # 処理時間を記録
     state.processing_time["preprocess_audio"] = time.time() - start_time
@@ -236,6 +252,7 @@ def load_model(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
     except Exception as e:
         state.status = "error"
         state.error_message = f"モデルロードエラー: {str(e)}"
+        logging.error(f"モデルロードエラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["load_model"] = time.time() - start_time
@@ -269,6 +286,7 @@ def detect_language(state: WhisperTranscriptionState) -> WhisperTranscriptionSta
     except Exception as e:
         state.status = "error"
         state.error_message = f"言語検出エラー: {str(e)}"
+        logging.error(f"言語検出エラー: {e}", exc_info=True)  # エラーログ出力
         traceback.print_exc()
     
     # 処理時間を記録
@@ -330,6 +348,7 @@ def transcribe_audio(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
     except Exception as e:
         state.status = "error"
         state.error_message = f"文字起こしエラー: {str(e)}"
+        logging.error(f"文字起こしエラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["transcribe_audio"] = time.time() - start_time
@@ -415,6 +434,7 @@ def identify_speakers(state: WhisperTranscriptionState) -> WhisperTranscriptionS
     except Exception as e:
         state.status = "error"
         state.error_message = f"話者識別エラー: {str(e)}"
+        logging.error(f"話者識別エラー: {e}", exc_info=True)  # エラーログ出力
         traceback.print_exc()
     
     # 処理時間を記録
@@ -483,6 +503,7 @@ def postprocess_text(state: WhisperTranscriptionState) -> WhisperTranscriptionSt
     except Exception as e:
         state.status = "error"
         state.error_message = f"テキスト後処理エラー: {str(e)}"
+        logging.error(f"テキスト後処理エラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["postprocess_text"] = time.time() - start_time
@@ -590,6 +611,7 @@ def format_output(state: WhisperTranscriptionState) -> WhisperTranscriptionState
     except Exception as e:
         state.status = "error"
         state.error_message = f"出力フォーマット変換エラー: {str(e)}"
+        logging.error(f"出力フォーマット変換エラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["format_output"] = time.time() - start_time
@@ -628,6 +650,7 @@ def evaluate_result(state: WhisperTranscriptionState) -> Dict[str, str]:
     except Exception as e:
         state.status = "error"
         state.error_message = f"結果評価エラー: {str(e)}"
+        logging.error(f"結果評価エラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["evaluate_result"] = time.time() - start_time
@@ -654,6 +677,7 @@ def finalize(state: WhisperTranscriptionState) -> WhisperTranscriptionState:
         if state.status != "error":
             state.status = "error"
         state.error_message += f" 完了処理エラー: {str(e)}"
+        logging.error(f"完了処理エラー: {e}", exc_info=True)  # エラーログ出力
     
     # 処理時間を記録
     state.processing_time["finalize"] = time.time() - start_time
@@ -866,8 +890,8 @@ class WhisperTranscriptionService:
                 "status": "completed",
                 "processing_time": processing_time
             }
-            
         except Exception as e:
+            logging.error(f"要約処理エラー: {e}", exc_info=True)  # エラーログ出力
             return {
                 "summary": None,
                 "status": "error",

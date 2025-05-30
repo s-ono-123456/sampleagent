@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 import japanize_matplotlib
+import logging  # ログ出力用
 
 # 親ディレクトリをパスに追加して、servicesモジュールをインポートできるようにする
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -16,6 +17,17 @@ sys.path.append(parent_dir)
 
 # 音声文字起こしサービスのインポート
 from services.whisper_transcription import WhisperTranscriptionService
+
+# ログ設定
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'whisper_transcription.log')
+logging.basicConfig(
+    filename=log_file,
+    level=logging.ERROR,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    encoding='utf-8'
+)
 
 # ページ設定
 st.set_page_config(
@@ -181,40 +193,43 @@ def render_upload_tab():
             
             # 実行ボタン
             start_button = st.button("文字起こしを開始", type="primary", use_container_width=True)
-            
             if start_button:
                 with st.spinner("文字起こしを実行中..."):
-                    # 文字起こしサービスの初期化
-                    service = WhisperTranscriptionService()
-                    # 文字起こし実行
-                    start_time = time.time()
-                    result = service.transcribe(
-                        audio_file=st.session_state.audio_file,
-                        language=st.session_state.language,
-                        format_type=st.session_state.output_format,
-                        enable_diarization=st.session_state.enable_diarization
-                    )
-                    end_time = time.time()
-                    
-                    # LangGraphの結果は辞書のような形式でアクセスする
-                    # 結果をセッション状態に保存
-                    # 新しい形式（辞書形式でのアクセス）                    
-                    st.session_state.transcription_result = result["transcript"]
-                    st.session_state.process_status = result["status"]
-                    st.session_state.segments = result["segments"]
-                    st.session_state.processing_time = result["processing_time"]
-                    st.session_state.confidence_score = result["confidence_score"]
-                    st.session_state.output_file = result["output_file"]
-                    
-                    # 話者分離情報の保存
-                    if st.session_state.enable_diarization:
-                        st.session_state.speaker_count = result.get("speaker_count", 0)
-                        st.session_state.speaker_segments = result.get("speaker_segments", [])
-                    
-                    # 文字起こし完了メッセージを表示
-                    processing_time_str = format_time(result["processing_time"].get("total", 0))
-                    confidence_percentage = int(result["confidence_score"] * 100)
-                    st.info(f"🎉 文字起こしが完了しました！結果タブを確認してください。\n処理時間: {processing_time_str} | 信頼度: {confidence_percentage}%")
+                    try:
+                        # 文字起こしサービスの初期化
+                        service = WhisperTranscriptionService()
+                        # 文字起こし実行
+                        start_time = time.time()
+                        result = service.transcribe(
+                            audio_file=st.session_state.audio_file,
+                            language=st.session_state.language,
+                            format_type=st.session_state.output_format,
+                            enable_diarization=st.session_state.enable_diarization
+                        )
+                        end_time = time.time()
+                        
+                        # LangGraphの結果は辞書のような形式でアクセスする
+                        # 結果をセッション状態に保存
+                        # 新しい形式（辞書形式でのアクセス）                    
+                        st.session_state.transcription_result = result["transcript"]
+                        st.session_state.process_status = result["status"]
+                        st.session_state.segments = result["segments"]
+                        st.session_state.processing_time = result["processing_time"]
+                        st.session_state.confidence_score = result["confidence_score"]
+                        st.session_state.output_file = result["output_file"]
+                        
+                        # 話者分離情報の保存
+                        if st.session_state.enable_diarization:
+                            st.session_state.speaker_count = result.get("speaker_count", 0)
+                            st.session_state.speaker_segments = result.get("speaker_segments", [])
+                        
+                        # 文字起こし完了メッセージを表示
+                        processing_time_str = format_time(result["processing_time"].get("total", 0))
+                        confidence_percentage = int(result["confidence_score"] * 100)
+                        st.info(f"🎉 文字起こしが完了しました！結果タブを確認してください。\n処理時間: {processing_time_str} | 信頼度: {confidence_percentage}%")
+                    except Exception as e:
+                        logging.error(f"文字起こし処理中にエラー: {e}", exc_info=True)
+                        st.error("文字起こし処理中にエラーが発生しました。詳細は管理者にお問い合わせください。")
                     
 
 def format_time(seconds):
@@ -511,41 +526,45 @@ def render_summary_tab():
         )
           # 要約ボタン
     if st.button("文字起こし内容を要約", type="primary", use_container_width=True):
-        with st.spinner("文字起こし内容を要約中..."):            
-            # WhisperTranscriptionServiceのインスタンスを作成
-            service = WhisperTranscriptionService()
-            
-            # トグルの状態をセッション状態に保存
-            st.session_state.include_speaker_info = include_speaker_info
-            
-            # セグメント情報の準備（話者情報を含めるかどうか）
-            segments_for_summary = st.session_state.segments
-            if not include_speaker_info:
-                # 話者情報を含めない場合は、セグメントから話者情報を削除したコピーを作成
-                segments_for_summary = []
-                for segment in st.session_state.segments:
-                    segment_copy = segment.copy()
-                    if "speaker" in segment_copy:
-                        del segment_copy["speaker"]
-                    segments_for_summary.append(segment_copy)
-            
-            # サービスの要約メソッドを呼び出し
-            result = service.summarize_transcription(
-                text=st.session_state.transcription_result,
-                language=st.session_state.language,
-                segments=segments_for_summary  # セグメント情報（時間情報と話者情報を含む/含まない）を渡す
-            )
-            
-            # 結果をセッション状態に保存
-            st.session_state.summary_result = result["summary"]
-            st.session_state.summary_status = result["status"]
-            st.session_state.summary_processing_time = result.get("processing_time", 0)
-            
-            # 要約完了メッセージを表示
-            if result["status"] == "completed":
-                st.success(f"要約が完了しました！ 処理時間: {format_time(result.get('processing_time', 0))}")
-            else:
-                st.error(f"要約中にエラーが発生しました: {result.get('error_message', '不明なエラー')}")
+        with st.spinner("文字起こし内容を要約中..."):
+            try:
+                # WhisperTranscriptionServiceのインスタンスを作成
+                service = WhisperTranscriptionService()
+                
+                # トグルの状態をセッション状態に保存
+                st.session_state.include_speaker_info = include_speaker_info
+                
+                # セグメント情報の準備（話者情報を含めるかどうか）
+                segments_for_summary = st.session_state.segments
+                if not include_speaker_info:
+                    # 話者情報を含まない場合は、セグメントから話者情報を削除したコピーを作成
+                    segments_for_summary = []
+                    for segment in st.session_state.segments:
+                        segment_copy = segment.copy()
+                        if "speaker" in segment_copy:
+                            del segment_copy["speaker"]
+                        segments_for_summary.append(segment_copy)
+                
+                # サービスの要約メソッドを呼び出し
+                result = service.summarize_transcription(
+                    text=st.session_state.transcription_result,
+                    language=st.session_state.language,
+                    segments=segments_for_summary  # セグメント情報（時間情報と話者情報を含む/含まない）を渡す
+                )
+                
+                # 結果をセッション状態に保存
+                st.session_state.summary_result = result["summary"]
+                st.session_state.summary_status = result["status"]
+                st.session_state.summary_processing_time = result.get("processing_time", 0)
+                
+                # 要約完了メッセージを表示
+                if result["status"] == "completed":
+                    st.success(f"要約が完了しました！ 処理時間: {format_time(result.get('processing_time', 0))}")
+                else:
+                    st.error(f"要約中にエラーが発生しました: {result.get('error_message', '不明なエラー')}")
+            except Exception as e:
+                logging.error(f"要約処理中にエラー: {e}", exc_info=True)
+                st.error("要約処理中にエラーが発生しました。詳細は管理者にお問い合わせください。")
     # 要約結果の表示
     if st.session_state.summary_result:
         st.subheader("要約結果")
