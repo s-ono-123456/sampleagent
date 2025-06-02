@@ -1,6 +1,6 @@
 openai
 langchain
-langchain_openai
+langchain-openai
 langsmith
 langchain_text_splitters
 langchain_community
@@ -16,6 +16,8 @@ nest-asyncio
 pymupdf4llm
 pywin32
 PyPDF2
+langchain-core
+python-dotenv
 
 # for whisper
 faster-whisper
