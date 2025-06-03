@@ -22,9 +22,10 @@ $remote_log_path = $env:REMOTE_LOG_PATH
 $local_log_path = $env:LOCAL_LOG_PATH
 $teraterm_path = $env:TERATERM_PATH
 $python_script = $env:PYTHON_SCRIPT
+$web_server_ip = $env:WEB_SERVER_IP
 
-if (-not $server -or -not $user -or -not $pass -or -not $remote_log_path -or -not $local_log_path -or -not $teraterm_path -or -not $python_script) {
-    Write-Host ".envファイルにSERVER, USER, PASS, REMOTE_LOG_PATH, LOCAL_LOG_PATH, TERATERM_PATH, PYTHON_SCRIPTを設定してください。"
+if (-not $server -or -not $user -or -not $pass -or -not $remote_log_path -or -not $local_log_path -or -not $teraterm_path -or -not $python_script -or -not $web_server_ip) {
+    Write-Host ".envファイルにSERVER, USER, PASS, REMOTE_LOG_PATH, LOCAL_LOG_PATH, TERATERM_PATH, PYTHON_SCRIPT, WEB_SERVER_IPを設定してください。"
     exit 1
 }
 
@@ -38,11 +39,23 @@ $local_log = $local_log_path -replace "\{date\}", $date
 # Teratermマクロファイルを作成
 $macro = @"
 ; Teratermマクロファイル
-connect '${server}:22 /ssh /auth=password /user=${user} /passwd=${pass}'
+; 1タブ目: 踏み台サーバにSSH接続し、ポートフォワーディングを維持
+connect '${server}:22 /ssh /auth=password /user=${user} /passwd=${pass} /L=10022:${web_server_ip}:22'
+wait '$ '
+
+; 2タブ目: ローカル10022経由でWebサーバにSSH接続し、ログ取得
+newtab
+connect 'localhost:10022 /ssh /auth=password /user=${user} /passwd=${pass}'
 wait '$ '
 sendln 'cat ${remote_log}'
 wait '$ '
 sendln 'exit'
+closetab
+
+; 1タブ目に戻って切断
+tab 1
+sendln 'exit'
+closetab
 "@
 
 $macro_path = "get_log.ttl"
